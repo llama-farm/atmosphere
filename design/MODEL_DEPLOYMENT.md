@@ -135,68 +135,178 @@ Node B accepts → Direct transfer A→B
 New nodes automatically receive relevant models based on their role.
 
 **When a new node joins:**
-1. Node announces: capabilities, memory, GPU, role
-2. Mesh identifies relevant models for that role
-3. Nearest peer with models initiates transfer
-4. Node confirms receipt and loads models
+1. Node sends SYNC_REQUEST to mesh
+2. Receives full routing table + model inventory via SYNC_RESPONSE
+3. Identifies models it should pull based on its role/capabilities
+4. Pulls models from nearest peers that have them
+5. Broadcasts MODEL_DEPLOYED for each loaded model
 
 **Example:**
 ```
 New edge node joins
         ↓
-Mesh sees: role=edge, memory=4GB, no-GPU
+Sends SYNC_REQUEST with capabilities
+        ↓
+Receives full routing table (all models, all nodes)
         ↓
 Identifies: anomaly-detector-v3, traffic-classifier-v2
         ↓
-Gateway-01 (nearest with models) initiates push
+Pulls from gateway-01 (nearest with models)
         ↓
-Edge node loads models, joins detection mesh
+Broadcasts MODEL_DEPLOYED for each model
+        ↓
+All nodes update routing table instantly
 ```
+
+## Fast Propagation Design
+
+**Goal:** When you train a new anomaly detector, ALL relevant nodes know about it within seconds.
+
+**Architecture:**
+```
+Train model → Register locally → Broadcast ROUTE_UPDATE
+                                        ↓
+                    All nodes update routing table (optimistic)
+                                        ↓
+                    Interested nodes send MODEL_REQUEST
+                                        ↓
+                    Transfer happens, MODEL_DEPLOYED broadcast
+                                        ↓
+                    Everyone knows who has it
+```
+
+**Key Principles:**
+1. **Optimistic local updates** - Apply route changes immediately, don't wait for confirmation
+2. **Eventual consistency** - Periodic MODEL_AVAILABLE announcements heal any gaps
+3. **TTL propagation** - Messages forward with decrementing TTL (default 10 hops)
+4. **Nonce deduplication** - Same message seen twice is ignored
+5. **Pre-computed embeddings** - ModelRoute includes embedding for fast semantic matching
 
 ## Protocol Messages
 
-### MODEL_AVAILABLE (Gossip)
+### Fast Propagation Messages
+
+These messages propagate instantly across the mesh (seconds, not minutes).
+
+#### ROUTE_UPDATE (Instant)
+Broadcast when a model's routing information changes.
+
+```json
+{
+  "type": "route_update",
+  "from": "gateway-01",
+  "action": "add",
+  "route": {
+    "project": "default/network-anomaly-v3",
+    "version": "1.0.0",
+    "model_type": "anomaly_detector",
+    "embedding": [0.1, 0.2, ...],
+    "nodes": ["gateway-01", "edge-01"],
+    "capabilities": ["anomaly_detection"],
+    "size_bytes": 12345678,
+    "checksum": "sha256:abc123...",
+    "metadata": {"threshold": -0.5},
+    "updated_at": 1706886600
+  },
+  "timestamp": 1706886600,
+  "ttl": 10,
+  "nonce": "abc123def456"
+}
+```
+
+#### MODEL_DEPLOYED (Instant)
+Broadcast immediately when a model is deployed to a node.
+
+```json
+{
+  "type": "model_deployed",
+  "from": "matt-dell",
+  "model_name": "network-anomaly-v3",
+  "model_version": "1.0.0",
+  "deployed_node": "matt-dell",
+  "timestamp": 1706886600,
+  "ttl": 10,
+  "nonce": "xyz789"
+}
+```
+
+### Sync Messages (On Join)
+
+#### SYNC_REQUEST
+Sent by new nodes to get full routing table.
+
+```json
+{
+  "type": "sync_request",
+  "from": "new-edge-node",
+  "node_capabilities": {
+    "node_id": "new-edge-node",
+    "role": "edge",
+    "memory_mb": 4096,
+    "has_gpu": false
+  },
+  "timestamp": 1706886600,
+  "nonce": "sync123"
+}
+```
+
+#### SYNC_RESPONSE
+Full routing table sent to joining node.
+
+```json
+{
+  "type": "sync_response",
+  "from": "gateway-01",
+  "to": "new-edge-node",
+  "nonce": "sync123",
+  "full_routes": [
+    {"project": "model-1", "version": "1.0.0", "nodes": [...], ...},
+    {"project": "model-2", "version": "2.0.0", "nodes": [...], ...}
+  ]
+}
+```
+
+### Discovery Messages (Periodic/On-Demand)
+
+#### MODEL_AVAILABLE (Periodic)
 ```json
 {
   "type": "model_available",
-  "from_node": "gateway-01",
-  "model": {
-    "name": "network-anomaly-detector",
-    "version": "1.0.0",
-    "type": "anomaly_detector",
-    "size_bytes": 12345678,
-    "checksum": "sha256:abc123...",
-    "capabilities": ["anomaly_detection"]
-  },
+  "from": "gateway-01",
+  "routes": [
+    {"project": "network-anomaly-v3", "version": "1.0.0", "nodes": ["gateway-01"], ...}
+  ],
   "timestamp": 1706886600,
   "ttl": 5
 }
 ```
 
-### MODEL_REQUEST (Direct/Gossip)
+#### MODEL_REQUEST
 ```json
 {
   "type": "model_request",
-  "from_node": "edge-05",
+  "from": "edge-05",
   "criteria": {
     "name": "network-anomaly-detector",
-    "version": ">=1.0.0",
     "capabilities": ["anomaly_detection"],
     "max_size_bytes": 50000000
   },
-  "urgency": "normal"
+  "urgency": "normal",
+  "ttl": 5
 }
 ```
 
-### MODEL_OFFER (Direct)
+#### MODEL_OFFER
 ```json
 {
   "type": "model_offer",
-  "from_node": "gateway-01",
-  "to_node": "edge-05",
-  "model": {
-    "name": "network-anomaly-detector",
-    "version": "1.0.0"
+  "from": "gateway-01",
+  "to": "edge-05",
+  "offer_route": {
+    "project": "network-anomaly-detector",
+    "version": "1.0.0",
+    "nodes": ["gateway-01"],
+    ...
   },
   "transfer_options": {
     "direct_tcp": "192.168.1.10:8765",
@@ -205,16 +315,14 @@ Edge node loads models, joins detection mesh
 }
 ```
 
-### MODEL_TRANSFER (Direct Stream)
+#### MODEL_ACK
 ```json
 {
-  "type": "model_transfer",
-  "model_name": "network-anomaly-detector",
-  "version": "1.0.0",
-  "chunk_index": 0,
-  "total_chunks": 10,
-  "data_base64": "...",
-  "checksum_chunk": "sha256:..."
+  "type": "model_ack",
+  "from": "edge-05",
+  "to": "gateway-01",
+  "offer_route": {"project": "network-anomaly-detector", ...},
+  "accepted": true
 }
 ```
 

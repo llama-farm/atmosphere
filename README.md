@@ -50,6 +50,51 @@ curl http://localhost:8000/v1/chat/completions \
 - **⚡ Fast Routing** — Pre-computed embeddings, sub-millisecond decisions
 - **📦 Model Deployment** — Automatically distribute models across the mesh
 - **🔄 Gossip Protocol** — Sync routing tables without central authority
+- **👁️ Multi-Modal** — Route text, images, audio, and tool calls
+- **🤖 Agent Framework** — Discover and invoke agents across the mesh
+- **🔧 Tool Execution** — Execute tools on remote nodes (cameras, IoT, APIs)
+
+---
+
+## 🦌 The Vision: Capability Mesh
+
+Atmosphere isn't just for text — it routes **any intent** to **any capability**:
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                      CAPABILITY MESH                                 │
+│                                                                      │
+│   "What is this?"     "Research llamas"    "Take a photo"          │
+│         │                    │                   │                  │
+│         ▼                    ▼                   ▼                  │
+│   ┌──────────┐        ┌──────────┐        ┌──────────┐             │
+│   │  Vision  │        │  Agent   │        │   Tool   │             │
+│   │ Classify │        │ Research │        │  Camera  │             │
+│   └──────────┘        └──────────┘        └──────────┘             │
+│         │                    │                   │                  │
+│         ▼                    ▼                   ▼                  │
+│      rob-mac              rob-mac           edge-gateway            │
+│   (has YOLO model)    (has research agent)  (has camera)           │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### Example: The Deer Scenario
+
+A tiny edge sensor sees movement but can't identify the animal:
+
+```
+Edge Sensor → "I see an animal" (low confidence)
+      ↓
+Mesh Routes → rob-mac (has wildlife classifier)
+      ↓
+Classification → "White-tailed deer" (94% confidence)
+      ↓
+Learning Loop → Train edge model → Deploy back
+      ↓
+Next time → Sensor handles locally
+```
+
+See [design/CAPABILITY_MESH.md](design/CAPABILITY_MESH.md) for the full architecture.
 
 ---
 
@@ -315,6 +360,47 @@ node_requirements:
 
 ---
 
+## 🎯 Typed Intents (Coming Soon)
+
+Beyond OpenAI-compatible chat, Atmosphere supports typed intents for any capability:
+
+```bash
+# Vision classification
+curl -X POST http://localhost:8000/v1/intent \
+  -d '{
+    "type": "vision/classify",
+    "domain": "wildlife",
+    "data": {"image": "<base64>"},
+    "preferences": {"latency": "low"}
+  }'
+
+# Agent invocation
+curl -X POST http://localhost:8000/v1/agent/invoke \
+  -d '{
+    "query": "Research the latest on llama breeding"
+  }'
+
+# Tool execution
+curl -X POST http://localhost:8000/v1/tool/execute \
+  -d '{
+    "tool": "camera-front@edge-gateway",
+    "action": "capture"
+  }'
+```
+
+### Supported Capability Types
+
+| Category | Types | Description |
+|----------|-------|-------------|
+| **LLM** | chat, reasoning, code, summarize | Text generation |
+| **Vision** | classify, detect, ocr, segment | Image processing |
+| **Audio** | transcribe, generate, identify | Audio processing |
+| **Agent** | research, workflow, monitor | Autonomous tasks |
+| **Tool** | camera, iot, api, file | Device/API control |
+| **ML** | anomaly, classify, forecast | ML inference |
+
+---
+
 ## 🛣️ Roadmap
 
 - [x] **Phase 1**: Single-node routing with LlamaFarm
@@ -323,6 +409,8 @@ node_requirements:
 - [ ] **Phase 4**: Multi-node mesh networking
 - [ ] **Phase 5**: Model deployment & distribution
 - [ ] **Phase 6**: Edge learning loop (train → deploy → learn)
+- [ ] **Phase 7**: Typed intents (vision, audio, agents, tools)
+- [ ] **Phase 8**: Distributed embeddings (SimHash for edge devices)
 
 ---
 
