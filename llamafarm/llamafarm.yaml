@@ -1,0 +1,230 @@
+version: v1
+name: discovery
+namespace: atmosphere
+
+# =============================================================================
+# ATMOSPHERE DISCOVERY SERVICE
+# =============================================================================
+# This project parses LlamaFarm configs and extracts structured metadata
+# for the Atmosphere mesh router. It's meta - LlamaFarm understanding LlamaFarm.
+
+runtime:
+  models:
+    # -------------------------------------------------------------------------
+    # CONFIG PARSER - Extracts project metadata from llamafarm.yaml
+    # -------------------------------------------------------------------------
+    - name: config-parser
+      description: Parses llamafarm.yaml configs and extracts structured project metadata
+      provider: ollama
+      model: qwen3:8b
+      base_url: http://localhost:11434/v1
+      prompts:
+        - config-parser
+      instructor_mode: json
+      tool_call_strategy: native_api
+      tools: []
+      keep_loaded: false
+      model_api_parameters:
+        temperature: 0.1
+        max_tokens: 2048
+
+    # -------------------------------------------------------------------------
+    # CAPABILITY CLASSIFIER - Determines what a project can do
+    # -------------------------------------------------------------------------
+    - name: capability-classifier
+      description: Classifies project capabilities from config and prompt analysis
+      provider: ollama
+      model: qwen3:8b
+      base_url: http://localhost:11434/v1
+      prompts:
+        - capability-classifier
+      instructor_mode: json
+      tool_call_strategy: native_api
+      tools: []
+      keep_loaded: false
+      model_api_parameters:
+        temperature: 0.1
+        max_tokens: 1024
+
+    # -------------------------------------------------------------------------
+    # INTENT MATCHER - Routes user intents to projects
+    # -------------------------------------------------------------------------
+    - name: intent-matcher
+      description: Matches user intents to available projects
+      provider: ollama
+      model: qwen3:8b
+      base_url: http://localhost:11434/v1
+      prompts:
+        - intent-matcher
+      instructor_mode: json
+      tool_call_strategy: native_api
+      tools: []
+      keep_loaded: false
+      model_api_parameters:
+        temperature: 0.2
+        max_tokens: 512
+
+# =============================================================================
+# PROMPTS
+# =============================================================================
+prompts:
+  # ---------------------------------------------------------------------------
+  # CONFIG PARSER PROMPT
+  # ---------------------------------------------------------------------------
+  - name: config-parser
+    messages:
+      - role: system
+        content: |
+          You are a LlamaFarm configuration parser. Your job is to analyze llamafarm.yaml 
+          configs and extract structured metadata about the project.
+          
+          Given a llamafarm.yaml configuration, extract:
+          1. namespace: The namespace (org/tenant)
+          2. name: The project name
+          3. models: List of model aliases defined
+          4. domain: Primary domain/topic (infer from system prompts and config)
+          5. capabilities: What the project can do ["chat", "rag", "tools", "embeddings", "vision"]
+          6. rag_summary: Brief description of RAG data if present (from prompts, dataset hints)
+          7. topics: Key topics/keywords (5-10 relevant terms)
+          8. description: One-sentence description of what this project does
+          
+          RESPOND ONLY WITH VALID JSON matching this schema:
+          {
+            "namespace": "string",
+            "name": "string", 
+            "models": ["string"],
+            "domain": "string",
+            "capabilities": ["string"],
+            "rag_summary": "string or null",
+            "topics": ["string"],
+            "description": "string"
+          }
+          
+          Be precise. Infer the domain from system prompts. If no RAG, set rag_summary to null.
+          Do not include any explanation, only the JSON object.
+
+  # ---------------------------------------------------------------------------
+  # CAPABILITY CLASSIFIER PROMPT
+  # ---------------------------------------------------------------------------
+  - name: capability-classifier
+    messages:
+      - role: system
+        content: |
+          You classify LlamaFarm project capabilities.
+          
+          Given project metadata, determine ALL capabilities:
+          - "chat": Can handle conversational interactions
+          - "rag": Has vector database / document retrieval
+          - "tools": Has tool/function calling configured
+          - "embeddings": Can generate embeddings
+          - "vision": Has vision/OCR capabilities
+          - "structured": Outputs structured JSON (instructor mode)
+          - "streaming": Supports streaming responses
+          
+          Also classify the complexity:
+          - "simple": Basic chat, no RAG or tools
+          - "rag-enabled": Has document retrieval
+          - "agentic": Has tools and can take actions
+          - "specialized": Domain-specific with custom training/fine-tuning
+          
+          RESPOND ONLY WITH JSON:
+          {
+            "capabilities": ["string"],
+            "complexity": "string",
+            "primary_use": "string"
+          }
+
+  # ---------------------------------------------------------------------------
+  # INTENT MATCHER PROMPT
+  # ---------------------------------------------------------------------------
+  - name: intent-matcher
+    messages:
+      - role: system
+        content: |
+          You match user intents to available projects.
+          
+          Given:
+          1. A user query/intent
+          2. A list of available projects with their metadata
+          
+          Determine which project(s) best match the intent.
+          
+          RESPOND ONLY WITH JSON:
+          {
+            "matches": [
+              {
+                "project": "namespace/name",
+                "confidence": 0.0-1.0,
+                "reason": "why this matches"
+              }
+            ],
+            "fallback": "namespace/name or null if no match"
+          }
+          
+          Rank by confidence. If no good match, set fallback to a general-purpose project.
+
+# =============================================================================
+# DATASETS - Store parsed project metadata
+# =============================================================================
+datasets:
+  - name: projects
+    description: Parsed project metadata for all discovered LlamaFarm projects
+    auto_process: false
+    database: projects_db
+
+# =============================================================================
+# RAG - Vector store for project discovery
+# =============================================================================
+rag:
+  default_database: projects_db
+  
+  databases:
+    - name: projects_db
+      type: ChromaStore
+      config:
+        persist_directory: ./data/projects_db
+        distance_function: cosine
+        collection_name: projects
+      embedding_strategies:
+        - name: default_embeddings
+          type: OllamaEmbedder
+          config:
+            model: nomic-embed-text
+            dimension: 768
+            batch_size: 16
+            timeout: 60
+            auto_pull: true
+          priority: 0
+      retrieval_strategies:
+        - name: semantic_search
+          type: BasicSimilarityStrategy
+          config:
+            distance_metric: cosine
+            top_k: 5
+          default: true
+      default_embedding_strategy: default_embeddings
+      default_retrieval_strategy: semantic_search
+
+  data_processing_strategies:
+    - name: project_processor
+      description: Process project metadata for vector search
+      parsers:
+        - type: TextParser_Python
+          config:
+            encoding: utf-8
+            chunk_size: 500
+            chunk_overlap: 50
+            chunk_strategy: sentences
+          file_include_patterns:
+            - "*.json"
+            - "*.yaml"
+          priority: 10
+      extractors:
+        - type: KeywordExtractor
+          config:
+            algorithm: yake
+            max_keywords: 10
+            min_keyword_length: 3
+          file_include_patterns:
+            - "*"
+          priority: 10

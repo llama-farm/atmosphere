@@ -1,0 +1,308 @@
+# Core Tools for Atmosphere MVP
+# These are the 10+ tools that must work in MVP
+
+tools:
+  # ============ SENSING ============
+  
+  - id: query_sensor
+    version: "1.0"
+    description: "Query a sensor for current or historical readings"
+    params:
+      sensor_id:
+        type: string
+        required: true
+      time_range:
+        type: object
+        properties:
+          start: datetime
+          end: datetime
+        required: false
+      aggregation:
+        type: string
+        enum: [raw, avg, min, max, sum]
+        default: raw
+    returns:
+      type: object
+      properties:
+        readings: array
+        sensor_id: string
+        unit: string
+    requires_capability: sensor_access
+    
+  - id: get_camera_frame
+    version: "1.0"
+    description: "Get current frame from a camera"
+    params:
+      camera_id:
+        type: string
+        required: true
+      resolution:
+        type: string
+        enum: [low, medium, high, native]
+        default: medium
+    returns:
+      type: object
+      properties:
+        frame_ref: string  # Reference, not actual image
+        timestamp: datetime
+        resolution: [width, height]
+    requires_capability: camera_access
+
+  # ============ COMPUTING ============
+    
+  - id: detect_objects
+    version: "1.0"
+    description: "Detect objects in an image"
+    params:
+      image_ref:
+        type: string
+        required: true
+        description: "Reference to image (local:path or mesh:node:path)"
+      model:
+        type: string
+        default: "yolov8n"
+      confidence_threshold:
+        type: float
+        default: 0.5
+        min: 0.0
+        max: 1.0
+    returns:
+      type: object
+      properties:
+        objects:
+          type: array
+          items:
+            class: string
+            confidence: float
+            bbox: [x, y, width, height]
+        inference_time_ms: integer
+    requires_capability: vision
+
+  - id: classify_image
+    version: "1.0"
+    description: "Classify an image into categories"
+    params:
+      image_ref:
+        type: string
+        required: true
+      model:
+        type: string
+        default: "mobilenet"
+      top_k:
+        type: integer
+        default: 5
+    returns:
+      type: object
+      properties:
+        classifications:
+          type: array
+          items:
+            class: string
+            confidence: float
+    requires_capability: vision
+
+  - id: llm_complete
+    version: "1.0"
+    description: "Generate text completion using LLM"
+    params:
+      prompt:
+        type: string
+        required: true
+      model:
+        type: string
+        default: "auto"  # Router picks best available
+      max_tokens:
+        type: integer
+        default: 500
+      temperature:
+        type: float
+        default: 0.7
+      system_prompt:
+        type: string
+        required: false
+    returns:
+      type: object
+      properties:
+        text: string
+        tokens_used: integer
+        model_used: string
+    requires_capability: llm
+
+  - id: embed_text
+    version: "1.0"
+    description: "Generate embedding vector for text"
+    params:
+      text:
+        type: string
+        required: true
+      model:
+        type: string
+        default: "nomic-embed-text"
+    returns:
+      type: object
+      properties:
+        embedding: array  # 384 or 768 floats
+        dimensions: integer
+    requires_capability: embeddings
+
+  - id: rag_search
+    version: "1.0"
+    description: "Search RAG database for relevant documents"
+    params:
+      query:
+        type: string
+        required: true
+      domain:
+        type: string
+        required: false
+        description: "Knowledge domain to search (omit for all)"
+      top_k:
+        type: integer
+        default: 5
+    returns:
+      type: object
+      properties:
+        results:
+          type: array
+          items:
+            chunk_id: string
+            content: string
+            score: float
+            metadata: object
+    requires_capability: rag
+
+  # ============ COMMUNICATING ============
+
+  - id: notify
+    version: "1.0"
+    description: "Send notification to person or channel"
+    params:
+      recipient:
+        type: string
+        required: true
+        description: "Email, phone, slack channel, etc."
+      message:
+        type: string
+        required: true
+      urgency:
+        type: string
+        enum: [low, medium, high, critical]
+        default: medium
+      title:
+        type: string
+        required: false
+    returns:
+      type: object
+      properties:
+        delivered: boolean
+        delivery_id: string
+        channel_used: string
+    requires_capability: notifications
+
+  - id: log_event
+    version: "1.0"
+    description: "Log an event to the event store"
+    params:
+      event_type:
+        type: string
+        required: true
+      data:
+        type: object
+        required: true
+      severity:
+        type: string
+        enum: [debug, info, warning, error, critical]
+        default: info
+      tags:
+        type: array
+        items: string
+        required: false
+    returns:
+      type: object
+      properties:
+        event_id: string
+        timestamp: datetime
+    requires_capability: logging
+
+  # ============ ACTING ============
+
+  - id: control_matter_device
+    version: "1.0"
+    description: "Send command to Matter/Thread device"
+    params:
+      device_id:
+        type: string
+        required: true
+      cluster:
+        type: string
+        required: true
+        description: "Matter cluster (OnOff, LevelControl, Thermostat, etc.)"
+      command:
+        type: string
+        required: true
+      params:
+        type: object
+        required: false
+    returns:
+      type: object
+      properties:
+        success: boolean
+        device_state: object
+    requires_capability: matter_bridge
+
+  # ============ MANAGING ============
+
+  - id: spawn_agent
+    version: "1.0"
+    description: "Spawn an agent on this or another node"
+    params:
+      agent_ref:
+        type: string
+        required: true
+        description: "Agent reference (e.g., vision_agent@1.2)"
+      diff:
+        type: object
+        required: false
+        description: "Overrides to base agent definition"
+      target_node:
+        type: string
+        required: false
+        description: "Node to spawn on (omit for best available)"
+      input:
+        type: object
+        required: false
+    returns:
+      type: object
+      properties:
+        agent_instance_id: string
+        node: string
+        status: string
+    requires_capability: agent_host
+
+  - id: store_learning_sample
+    version: "1.0"
+    description: "Store a sample for future model training"
+    params:
+      sample_type:
+        type: string
+        required: true
+        enum: [image_classification, object_detection, anomaly, text]
+      data_ref:
+        type: string
+        required: true
+        description: "Reference to the input data"
+      label:
+        type: string
+        required: true
+      metadata:
+        type: object
+        required: false
+      source_model:
+        type: string
+        required: false
+    returns:
+      type: object
+      properties:
+        sample_id: string
+        stored: boolean
+    requires_capability: learning_storage

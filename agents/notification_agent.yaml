@@ -1,0 +1,291 @@
+# agents/notification_agent.yaml
+# Handles all outbound notifications with rate limiting and deduplication
+
+agent:
+  id: notification_agent
+  version: "1.0"
+  type: reactive
+  
+  description: |
+    Central notification hub for all outbound communications. Routes notifications
+    to appropriate channels (email, Slack, SMS, webhooks, push) based on priority,
+    user preferences, and channel availability.
+    
+    Implements rate limiting to prevent notification spam, deduplication to avoid
+    repeats, and escalation paths for critical alerts that aren't acknowledged.
+  
+  triggers:
+    - name: notify_request
+      description: "Standard notification request from any agent"
+      params:
+        message: string
+        title: string
+        priority: string          # "low" | "normal" | "high" | "critical"
+        channels: array           # Requested channels
+        recipient: string         # User ID or group
+        source_agent: string
+        context: object           # Additional context for templates
+        dedup_key: string         # Optional key for deduplication
+        
+    - name: scheduled_digest
+      description: "Trigger for sending digest notifications"
+      params:
+        digest_type: string       # "daily" | "weekly" | "custom"
+        recipient: string
+        
+    - name: escalation_check
+      description: "Check for unacknowledged critical notifications"
+      params:
+        check_type: string        # "periodic" | "manual"
+  
+  tools:
+    required:
+      - send_notification       # Generic send via any channel
+    optional:
+      - send_email              # Direct email sending
+      - send_slack              # Slack message/DM
+      - send_sms                # SMS via configured provider
+      - post_webhook            # HTTP webhook POST
+      - send_push               # Push notification
+      - send_discord            # Discord message
+      - send_telegram           # Telegram message
+      - check_acknowledgment    # Check if notification was acknowledged
+      - query_preferences       # Get user notification preferences
+  
+  default_params:
+    # Rate limiting
+    rate_limit_window_seconds: 60
+    rate_limit_max_per_window: 10
+    rate_limit_per_channel: true
+    
+    # Deduplication
+    dedup_window_seconds: 300
+    dedup_enabled: true
+    
+    # Escalation
+    escalation_enabled: true
+    escalation_delay_seconds: 300
+    max_escalation_levels: 3
+    
+    # Digest
+    digest_enabled: true
+    digest_max_items: 50
+    
+    # Retry
+    retry_on_failure: true
+    max_retries: 3
+    retry_backoff_seconds: 30
+  
+  instructions: |
+    ## Notification Pipeline
+    
+    1. **Request Validation**
+       - Validate required fields (message, recipient)
+       - Normalize priority (default to "normal")
+       - Resolve recipient to user profile
+    
+    2. **Preference Resolution**
+       - Query user notification preferences
+       - Filter requested channels by user preferences
+       - Apply time-based rules (quiet hours, etc.)
+       - Determine effective channels
+    
+    3. **Deduplication Check**
+       - If dedup_key provided:
+         - Check if same key sent within dedup_window
+         - If duplicate: log and skip (or aggregate)
+       - If no dedup_key:
+         - Generate key from message hash
+         - Apply same logic
+    
+    4. **Rate Limiting**
+       - Check rate limit for recipient + channel
+       - If under limit: proceed
+       - If over limit:
+         - Queue for later if possible
+         - Or downgrade to digest
+         - Critical priority bypasses rate limit
+    
+    5. **Channel Routing**
+       Based on priority and preferences:
+       
+       | Priority | Default Channels | Escalation |
+       |----------|------------------|------------|
+       | low      | digest only      | none       |
+       | normal   | email, push      | none       |
+       | high     | email, push, slack | +sms after 5min |
+       | critical | all channels     | +call after 10min |
+    
+    6. **Message Formatting**
+       - Apply channel-specific formatting
+       - Render templates with context
+       - Truncate for channel limits (SMS: 160 chars, etc.)
+       - Include action buttons where supported
+    
+    7. **Delivery**
+       - Send via each selected channel
+       - Track delivery status per channel
+       - Log all attempts
+       - Handle failures with retry
+    
+    8. **Escalation Monitoring** (for high/critical)
+       - Start escalation timer
+       - If not acknowledged within delay:
+         - Escalate to next level
+         - Try additional channels
+         - Notify escalation contacts
+    
+    9. **Digest Aggregation**
+       - Collect low-priority notifications
+       - Group by category/source
+       - Send consolidated digest on schedule
+  
+  resource_profile:
+    min_memory_mb: 64
+    typical_memory_mb: 128
+    requires_gpu: false
+    typical_latency_ms: 200       # Per notification
+    max_queued_notifications: 10000
+  
+  channels:
+    email:
+      provider: "${EMAIL_PROVIDER}"  # "sendgrid" | "ses" | "smtp"
+      from_address: "${NOTIFICATION_EMAIL}"
+      templates:
+        default: "templates/email/default.html"
+        alert: "templates/email/alert.html"
+        digest: "templates/email/digest.html"
+      rate_limit: 100              # per hour
+      
+    slack:
+      workspace: "${SLACK_WORKSPACE}"
+      default_channel: "#alerts"
+      bot_name: "Atmosphere"
+      templates:
+        default: "templates/slack/default.json"
+        alert: "templates/slack/alert.json"
+      rate_limit: 60               # per minute
+      
+    sms:
+      provider: "${SMS_PROVIDER}"  # "twilio" | "aws_sns"
+      from_number: "${SMS_FROM}"
+      max_length: 160
+      rate_limit: 10               # per hour
+      cost_per_message: 0.01
+      
+    push:
+      provider: "${PUSH_PROVIDER}" # "firebase" | "apns" | "onesignal"
+      rate_limit: 30               # per hour
+      
+    webhook:
+      timeout_ms: 5000
+      retry_count: 3
+      rate_limit: 100              # per minute
+      
+    discord:
+      bot_token: "${DISCORD_BOT_TOKEN}"
+      default_channel: "${DISCORD_ALERT_CHANNEL}"
+      rate_limit: 30               # per minute
+      
+    telegram:
+      bot_token: "${TELEGRAM_BOT_TOKEN}"
+      rate_limit: 30               # per minute
+  
+  priority_rules:
+    low:
+      channels: ["digest"]
+      immediate: false
+      escalation: false
+      rate_limit_bypass: false
+      
+    normal:
+      channels: ["email", "push"]
+      immediate: true
+      escalation: false
+      rate_limit_bypass: false
+      
+    high:
+      channels: ["email", "push", "slack"]
+      immediate: true
+      escalation: true
+      escalation_delay_seconds: 300
+      escalation_channels: ["sms"]
+      rate_limit_bypass: false
+      
+    critical:
+      channels: ["email", "push", "slack", "sms"]
+      immediate: true
+      escalation: true
+      escalation_delay_seconds: 180
+      escalation_channels: ["phone_call"]
+      rate_limit_bypass: true
+      require_acknowledgment: true
+  
+  quiet_hours:
+    enabled: true
+    default_schedule:
+      start: "22:00"
+      end: "08:00"
+      timezone: "local"
+    override_for:
+      - priority: "critical"
+      - priority: "high"
+    behavior: "queue"              # "queue" | "digest" | "drop"
+  
+  deduplication:
+    strategies:
+      exact_match:
+        fields: ["message", "recipient"]
+        window_seconds: 300
+      semantic_match:
+        enabled: false             # Requires LLM
+        similarity_threshold: 0.9
+      key_based:
+        enabled: true              # Use provided dedup_key
+  
+  escalation:
+    levels:
+      - level: 1
+        delay_seconds: 300
+        channels: ["sms"]
+        contacts: ["primary"]
+      - level: 2
+        delay_seconds: 600
+        channels: ["phone_call"]
+        contacts: ["primary", "secondary"]
+      - level: 3
+        delay_seconds: 900
+        channels: ["phone_call"]
+        contacts: ["on_call_team"]
+    
+    acknowledgment:
+      methods: ["button_click", "reply", "api_call"]
+      timeout_seconds: 300
+  
+  outputs:
+    - name: notification_result
+      description: "Result of notification attempt"
+      schema:
+        notification_id: string
+        status: string            # "sent" | "queued" | "deduplicated" | "rate_limited" | "failed"
+        channels_attempted: array
+        channels_succeeded: array
+        channels_failed: array
+        escalation_triggered: boolean
+        
+    - name: digest_result
+      description: "Result of digest send"
+      schema:
+        digest_id: string
+        recipient: string
+        items_included: integer
+        items_dropped: integer
+        channels: array
+  
+  dependencies:
+    agents: []                    # Standalone - other agents call this
+    capabilities:
+      - email:send
+      - sms:send
+      - push:send
+      - slack:send

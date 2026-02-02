@@ -1,0 +1,639 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://atmosphere.ai/schemas/agent.json",
+  "title": "Atmosphere Agent Definition",
+  "description": "Schema for defining agents in the Atmosphere distributed AI system",
+  "type": "object",
+  "required": ["agent"],
+  "additionalProperties": false,
+  "properties": {
+    "agent": {
+      "type": "object",
+      "required": ["id", "version", "type", "description", "triggers", "tools", "instructions"],
+      "additionalProperties": true,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "description": "Unique identifier for the agent (snake_case)",
+          "examples": ["vision_agent", "anomaly_detector", "my_custom_agent"]
+        },
+        "version": {
+          "type": "string",
+          "pattern": "^\\d+\\.\\d+(\\.\\d+)?$",
+          "description": "Semantic version of the agent definition",
+          "examples": ["1.0", "1.2.3", "2.0"]
+        },
+        "type": {
+          "type": "string",
+          "enum": ["reactive", "deliberative", "orchestrator", "cognitive"],
+          "description": "Agent execution type determining its behavior model"
+        },
+        "description": {
+          "type": "string",
+          "minLength": 10,
+          "description": "Human-readable description of the agent's purpose and capabilities"
+        },
+        "triggers": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/definitions/trigger"
+          },
+          "description": "Events that activate this agent"
+        },
+        "tools": {
+          "type": "object",
+          "required": ["required"],
+          "properties": {
+            "required": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9_]*$"
+              },
+              "description": "Tools the agent must have to operate"
+            },
+            "optional": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9_]*$"
+              },
+              "description": "Tools that enhance the agent but aren't required"
+            }
+          },
+          "additionalProperties": false
+        },
+        "default_params": {
+          "type": "object",
+          "description": "Default parameter values for agent operation",
+          "additionalProperties": true
+        },
+        "instructions": {
+          "type": "string",
+          "minLength": 50,
+          "description": "Processing logic and decision flow in natural language"
+        },
+        "resource_profile": {
+          "$ref": "#/definitions/resourceProfile"
+        },
+        "escalation": {
+          "$ref": "#/definitions/escalation"
+        },
+        "learning": {
+          "$ref": "#/definitions/learning"
+        },
+        "outputs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/output"
+          },
+          "description": "Definitions of outputs the agent produces"
+        },
+        "dependencies": {
+          "$ref": "#/definitions/dependencies"
+        },
+        "notifications": {
+          "type": "object",
+          "properties": {
+            "rules": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "condition": {
+                    "type": "string"
+                  },
+                  "priority": {
+                    "type": "string",
+                    "enum": ["low", "normal", "high", "critical"]
+                  },
+                  "channels": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "description": "Notification rules for this agent"
+        },
+        "sensor_profiles": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/definitions/sensorProfile"
+          },
+          "description": "Profiles for different sensor types (anomaly_agent)"
+        },
+        "channels": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/definitions/notificationChannel"
+          },
+          "description": "Notification channel configurations (notification_agent)"
+        },
+        "priority_rules": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/definitions/priorityRule"
+          },
+          "description": "Priority-based notification rules (notification_agent)"
+        },
+        "quiet_hours": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "default_schedule": {
+              "type": "object",
+              "properties": {
+                "start": { "type": "string" },
+                "end": { "type": "string" },
+                "timezone": { "type": "string" }
+              }
+            },
+            "override_for": {
+              "type": "array",
+              "items": { "type": "object" }
+            },
+            "behavior": {
+              "type": "string",
+              "enum": ["queue", "digest", "drop"]
+            }
+          }
+        },
+        "deduplication": {
+          "type": "object",
+          "properties": {
+            "strategies": {
+              "type": "object"
+            }
+          },
+          "description": "Deduplication configuration"
+        },
+        "delegation": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "strategies": {
+              "type": "array",
+              "items": { "type": "object" }
+            },
+            "aggregation": { "type": "object" }
+          },
+          "description": "Delegation configuration for distributed execution"
+        },
+        "caching": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "ttl_seconds": { "type": "integer" },
+            "cache_key_strategy": { "type": "string" },
+            "invalidation": {
+              "type": "array",
+              "items": { "type": "string" }
+            }
+          },
+          "description": "Caching configuration"
+        },
+        "quality_controls": {
+          "type": "object",
+          "description": "Quality control settings for research/analysis agents"
+        },
+        "workflow_patterns": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "description": { "type": "string" },
+              "example": { "type": "string" }
+            }
+          },
+          "description": "Pre-defined workflow patterns (orchestrator_agent)"
+        },
+        "state_management": {
+          "type": "object",
+          "properties": {
+            "persistence": { "type": "boolean" },
+            "storage": { "type": "string" },
+            "checkpoint_fields": {
+              "type": "array",
+              "items": { "type": "string" }
+            },
+            "recovery": { "type": "object" }
+          },
+          "description": "State management configuration"
+        },
+        "mesh_coordination": {
+          "type": "object",
+          "description": "Mesh coordination settings for orchestrator"
+        },
+        "error_handling": {
+          "type": "object",
+          "properties": {
+            "strategies": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "type": { "type": "string" },
+                  "conditions": {
+                    "type": "array",
+                    "items": { "type": "string" }
+                  },
+                  "action": { "type": "string" },
+                  "max_attempts": { "type": "integer" }
+                }
+              }
+            }
+          },
+          "description": "Error handling strategies"
+        },
+        "sample_management": {
+          "type": "object",
+          "description": "Sample management for learning_agent"
+        },
+        "llamafarm_integration": {
+          "type": "object",
+          "description": "LlamaFarm training backend configuration"
+        },
+        "drift_detection": {
+          "type": "object",
+          "description": "Model drift detection configuration"
+        },
+        "model_registry": {
+          "type": "object",
+          "description": "Model versioning and registry configuration"
+        },
+        "hardware_profiles": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/definitions/hardwareProfile"
+          },
+          "description": "Known hardware profiles (provisioning_agent)"
+        },
+        "mission_profiles": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/definitions/missionProfile"
+          },
+          "description": "Mission templates for provisioning"
+        },
+        "quarantine": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "conditions": {
+              "type": "array",
+              "items": { "type": "string" }
+            },
+            "actions": {
+              "type": "array",
+              "items": { "type": "string" }
+            },
+            "auto_release": { "type": "boolean" }
+          },
+          "description": "Quarantine configuration for unknown nodes"
+        },
+        "fleet_management": {
+          "type": "object",
+          "description": "Fleet management configuration"
+        }
+      }
+    }
+  },
+  "definitions": {
+    "trigger": {
+      "type": "object",
+      "required": ["name", "description"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "description": "Unique trigger identifier within the agent"
+        },
+        "description": {
+          "type": "string",
+          "description": "Human-readable description of when this trigger fires"
+        },
+        "params": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "Parameters provided when this trigger fires"
+        }
+      },
+      "additionalProperties": false
+    },
+    "resourceProfile": {
+      "type": "object",
+      "properties": {
+        "min_memory_mb": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Minimum memory required to run"
+        },
+        "typical_memory_mb": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Expected memory usage during normal operation"
+        },
+        "peak_memory_mb": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Maximum memory during peak usage"
+        },
+        "requires_gpu": {
+          "type": "boolean",
+          "description": "Whether GPU is required"
+        },
+        "gpu_memory_mb": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "GPU VRAM required if using GPU"
+        },
+        "typical_latency_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Expected response time"
+        },
+        "max_latency_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Maximum acceptable latency"
+        },
+        "max_concurrent_sensors": {
+          "type": "integer",
+          "description": "Maximum concurrent sensor streams"
+        },
+        "max_concurrent_workflows": {
+          "type": "integer",
+          "description": "Maximum concurrent workflows"
+        },
+        "max_queued_notifications": {
+          "type": "integer",
+          "description": "Maximum queued notifications"
+        }
+      },
+      "additionalProperties": false
+    },
+    "escalation": {
+      "type": "object",
+      "properties": {
+        "threshold": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Confidence threshold below which to escalate"
+        },
+        "target_capability": {
+          "type": "string",
+          "description": "Primary capability to escalate to"
+        },
+        "fallback_capability": {
+          "type": "string",
+          "description": "Fallback if primary is unavailable"
+        },
+        "timeout_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Timeout for escalation response"
+        },
+        "retry_count": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Number of retries before giving up"
+        },
+        "circuit_breaker": {
+          "type": "object",
+          "properties": {
+            "failure_threshold": {
+              "type": "integer",
+              "description": "Failures before opening circuit"
+            },
+            "reset_timeout_ms": {
+              "type": "integer",
+              "description": "Time before retry after circuit opens"
+            }
+          }
+        },
+        "conditions": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          },
+          "description": "Conditions for escalation"
+        },
+        "levels": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          },
+          "description": "Escalation levels"
+        }
+      },
+      "additionalProperties": true
+    },
+    "learning": {
+      "type": "object",
+      "properties": {
+        "sample_storage": {
+          "type": "string",
+          "description": "Storage location for learning samples"
+        },
+        "sample_threshold": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Confidence threshold below which to collect samples"
+        },
+        "batch_trigger_count": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Sample count to trigger training batch"
+        },
+        "max_samples_per_class": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Maximum samples per class to prevent imbalance"
+        },
+        "metadata_fields": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Fields to capture with each sample"
+        },
+        "collect_on": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Events that trigger sample collection"
+        }
+      },
+      "additionalProperties": false
+    },
+    "output": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "description": "Output identifier"
+        },
+        "description": {
+          "type": "string",
+          "description": "Description of this output"
+        },
+        "schema": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "Schema of the output structure"
+        }
+      },
+      "additionalProperties": false
+    },
+    "dependencies": {
+      "type": "object",
+      "properties": {
+        "agents": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Other agents this agent depends on"
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Capabilities required from the mesh"
+        }
+      },
+      "additionalProperties": false
+    },
+    "sensorProfile": {
+      "type": "object",
+      "properties": {
+        "unit": { "type": "string" },
+        "normal_range": {
+          "type": "array",
+          "items": { "type": "number" },
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "critical_range": {
+          "type": "array",
+          "items": { "type": "number" },
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "max_rate_of_change": { "type": "number" },
+        "seasonal": { "type": "boolean" },
+        "frequency_analysis": { "type": "boolean" },
+        "time_of_day_patterns": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "notificationChannel": {
+      "type": "object",
+      "properties": {
+        "provider": { "type": "string" },
+        "from_address": { "type": "string" },
+        "from_number": { "type": "string" },
+        "workspace": { "type": "string" },
+        "default_channel": { "type": "string" },
+        "bot_name": { "type": "string" },
+        "bot_token": { "type": "string" },
+        "templates": { "type": "object" },
+        "rate_limit": { "type": "integer" },
+        "max_length": { "type": "integer" },
+        "cost_per_message": { "type": "number" },
+        "timeout_ms": { "type": "integer" },
+        "retry_count": { "type": "integer" }
+      },
+      "additionalProperties": true
+    },
+    "priorityRule": {
+      "type": "object",
+      "properties": {
+        "channels": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "immediate": { "type": "boolean" },
+        "escalation": { "type": "boolean" },
+        "escalation_delay_seconds": { "type": "integer" },
+        "escalation_channels": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "rate_limit_bypass": { "type": "boolean" },
+        "require_acknowledgment": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "hardwareProfile": {
+      "type": "object",
+      "properties": {
+        "platform": { "type": "string" },
+        "architecture": { "type": "string" },
+        "gpu": { "type": "string" },
+        "memory_range": {
+          "type": "array",
+          "items": { "type": "integer" },
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "capabilities": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "typical_missions": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "missionProfile": {
+      "type": "object",
+      "properties": {
+        "description": { "type": "string" },
+        "required_capabilities": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "optional_capabilities": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "agents": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "models": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              { "type": "string" },
+              {
+                "type": "object",
+                "properties": {
+                  "name": { "type": "string" },
+                  "condition": { "type": "string" }
+                }
+              }
+            ]
+          }
+        },
+        "config": { "type": "object" }
+      },
+      "additionalProperties": false
+    }
+  }
+}

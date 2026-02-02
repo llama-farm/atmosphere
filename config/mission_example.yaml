@@ -1,0 +1,196 @@
+# Example Mission Configuration
+# This file defines how to provision devices for a specific mission
+# 
+# When a device joins with "mission: production-inspection", this config
+# determines what models, agents, and tools it gets.
+
+mission:
+  id: production-inspection
+  name: "Production Line Visual Inspection"
+  description: |
+    Inspect widgets on the production line for defects.
+    Uses local edge models for speed, escalates uncertain cases.
+    Participates in learning loop to improve over time.
+  
+  # Hardware tiers and what each gets
+  hardware_tiers:
+    
+    # Tier 1: Low-power edge (Jetson Nano, RPi 5, ESP32 with camera)
+    tier_1:
+      requirements:
+        min_ram_gb: 2
+        gpu: optional
+      
+      models:
+        - id: tinyyolo-defects
+          version: "1.3"
+          size_mb: 6
+          role: primary_detector
+          format: onnx  # Works on CPU
+          
+        - id: isolation-forest-line
+          version: "1.0"
+          size_mb: 0.5
+          role: anomaly_detector
+          format: pickle
+      
+      agents:
+        - vision_agent@1.2
+        - anomaly_agent@1.0
+        - learning_agent@1.1
+      
+      tools:
+        - detect_objects
+        - classify_image
+        - query_sensor
+        - log_event
+        - notify
+        - store_learning_sample
+    
+    # Tier 2: Mid-power edge (Jetson Orin, Mac Mini, workstation)
+    tier_2:
+      requirements:
+        min_ram_gb: 8
+        gpu: required
+      
+      models:
+        - id: yolov8s-defects
+          version: "2.1"
+          size_mb: 22
+          role: primary_detector
+          format: tensorrt  # GPU optimized
+          
+        - id: mobilenet-classifier
+          version: "1.5"
+          size_mb: 14
+          role: classifier
+          format: tensorrt
+          
+        - id: isolation-forest-line
+          version: "1.0"
+          size_mb: 0.5
+          role: anomaly_detector
+          format: pickle
+      
+      agents:
+        - vision_agent@1.2
+        - anomaly_agent@1.0
+        - learning_agent@1.1
+        - escalation_handler@1.0  # Can handle escalations from tier_1
+      
+      tools:
+        - detect_objects
+        - classify_image
+        - segment_image
+        - query_sensor
+        - log_event
+        - notify
+        - store_learning_sample
+        - spawn_agent
+    
+    # Tier 3: High-power (GPU workstation, server)
+    tier_3:
+      requirements:
+        min_ram_gb: 32
+        gpu: required
+        vram_gb: 16
+      
+      models:
+        - id: yolov8x-defects
+          version: "2.1"
+          size_mb: 130
+          role: primary_detector
+          format: tensorrt
+          
+        - id: defect-classifier-large
+          version: "3.0"
+          size_mb: 200
+          role: classifier
+          format: tensorrt
+          
+        - id: llama3-8b-inspection
+          version: "1.0"
+          size_mb: 4500
+          role: reasoning
+          format: gguf
+          quantization: q4_k_m
+      
+      agents:
+        - vision_agent@1.2
+        - anomaly_agent@1.0
+        - learning_agent@1.1
+        - escalation_handler@1.0
+        - reasoning_agent@1.0
+        - training_coordinator@1.0  # Manages training jobs
+      
+      tools:
+        - detect_objects
+        - classify_image
+        - segment_image
+        - llm_complete
+        - embed_text
+        - rag_search
+        - query_sensor
+        - log_event
+        - notify
+        - store_learning_sample
+        - spawn_agent
+        - request_training
+  
+  # Behavior configuration (applies to all tiers)
+  config:
+    # Escalation
+    escalation:
+      confidence_threshold: 0.85
+      targets:
+        - capability: vision:large_model
+          tier: tier_2
+        - capability: vision:xlarge_model
+          tier: tier_3
+        - capability: reasoning
+          tier: tier_3
+      timeout_ms: 5000
+      fallback: log_and_continue
+    
+    # Learning
+    learning:
+      enabled: true
+      sample_collection: escalated_only  # Only collect uncertain samples
+      batch_trigger_count: 100
+      training_schedule: "0 2 * * 0"  # Sunday 2 AM
+      training_target: tier_3  # Where to run training
+    
+    # Notifications
+    notifications:
+      defect_found:
+        urgency: high
+        recipients:
+          - channel: slack
+            target: "#quality-alerts"
+      escalation_timeout:
+        urgency: medium
+        recipients:
+          - channel: email
+            target: "qa-team@company.com"
+    
+    # Data retention
+    retention:
+      raw_frames: 24h
+      escalated_samples: 90d
+      detection_logs: 1y
+  
+  # Knowledge domains this mission needs
+  knowledge:
+    - domain: defect-catalog
+      description: "Reference images and descriptions of known defects"
+      priority: high
+    - domain: sop-inspection
+      description: "Standard operating procedures for inspection"
+      priority: medium
+  
+  # LlamaFarm project association
+  llamafarm:
+    project: production-inspection
+    rag_strategies:
+      - defect-knowledge
+      - sop-docs

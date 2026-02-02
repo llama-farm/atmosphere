@@ -1,0 +1,218 @@
+# agents/research_agent.yaml
+# Deliberative agent for information gathering and synthesis
+
+agent:
+  id: research_agent
+  version: "1.0"
+  type: deliberative
+  
+  description: |
+    Gathers, analyzes, and synthesizes information from multiple sources including
+    web search, local RAG systems, databases, and APIs. Operates in deliberative
+    mode - takes time to plan approach, gather evidence, and produce comprehensive
+    results.
+    
+    Can delegate specialized research tasks to sub-agents on other nodes with
+    specific capabilities (e.g., domain expertise, local data access).
+  
+  triggers:
+    - name: query
+      description: "Research query from user or another agent"
+      params:
+        question: string
+        context: string           # Background context
+        constraints:
+          max_time_seconds: integer
+          sources: array          # Allowed sources
+          depth: string           # "shallow" | "moderate" | "deep"
+        output_format: string     # "summary" | "report" | "bullets" | "raw"
+        
+    - name: manual
+      description: "Direct research request with full parameters"
+      params:
+        topic: string
+        subtopics: array
+        known_facts: array
+        questions: array
+        deadline: integer
+        
+    - name: delegated_task
+      description: "Sub-task from orchestrator or parent research"
+      params:
+        parent_task_id: string
+        scope: object
+        return_format: string
+  
+  tools:
+    required:
+      - search_web              # Web search via configured provider
+      - summarize               # LLM-based summarization
+    optional:
+      - rag_search              # Local RAG/vector search
+      - query_database          # SQL/NoSQL database queries
+      - fetch_url               # Direct URL fetching
+      - extract_entities        # NER and entity extraction
+      - delegate_to_node        # Send sub-task to another node
+      - cache_result            # Cache intermediate results
+      - cite_sources            # Generate citations
+  
+  default_params:
+    # Search configuration
+    max_search_results: 10
+    search_providers: ["brave", "google"]
+    include_scholarly: false
+    recency_preference: "any"     # "any" | "recent" | "last_year" | "last_month"
+    
+    # RAG configuration
+    rag_top_k: 5
+    rag_similarity_threshold: 0.7
+    
+    # Processing
+    max_concurrent_fetches: 5
+    fetch_timeout_ms: 10000
+    summarization_model: "default"
+    
+    # Output
+    include_citations: true
+    citation_style: "inline"      # "inline" | "footnote" | "bibliography"
+    confidence_threshold: 0.6     # Minimum confidence to include fact
+  
+  instructions: |
+    ## Research Pipeline
+    
+    1. **Query Analysis**
+       - Parse the research question
+       - Identify key entities, concepts, and relationships
+       - Determine question type (factual, comparative, exploratory, etc.)
+       - Break complex questions into sub-questions
+    
+    2. **Source Planning**
+       - Based on question type, plan source strategy:
+         - Factual: RAG first, then web for verification
+         - Current events: Web first, recent filter
+         - Technical: RAG + scholarly sources
+         - Comparative: Multiple web sources for balance
+       - Identify if delegation to specialized nodes is beneficial
+    
+    3. **Information Gathering**
+       
+       a. **Local RAG Search** (if available)
+          - Query local knowledge base
+          - Extract relevant passages with citations
+          - Note confidence scores
+       
+       b. **Web Search**
+          - Formulate optimized search queries
+          - Execute searches across configured providers
+          - Fetch and parse top results
+          - Extract relevant content
+       
+       c. **Database Queries** (if applicable)
+          - Query structured data sources
+          - Cross-reference with unstructured results
+       
+       d. **Delegation** (for complex queries)
+          - Identify sub-tasks suited for other nodes
+          - Delegate via delegate_to_node
+          - Aggregate results when complete
+    
+    4. **Synthesis**
+       - Deduplicate information across sources
+       - Identify contradictions and note them
+       - Assess confidence for each fact
+       - Build coherent narrative or structure
+    
+    5. **Citation & Attribution**
+       - Track all sources used
+       - Generate proper citations
+       - Note source reliability/bias if known
+    
+    6. **Output Generation**
+       - Format according to output_format
+       - Include confidence indicators
+       - Provide citations
+       - Note limitations and gaps
+  
+  resource_profile:
+    min_memory_mb: 256
+    typical_memory_mb: 512
+    requires_gpu: false
+    typical_latency_ms: 5000      # Research takes time
+    max_latency_ms: 60000         # Deep research cap
+  
+  delegation:
+    # Rules for delegating to other nodes
+    enabled: true
+    strategies:
+      - condition: "topic.domain == 'medical'"
+        target_capability: "research:medical"
+        reason: "Specialized medical knowledge base"
+        
+      - condition: "topic.requires_local_data"
+        target_capability: "research:local"
+        reason: "Access to local databases"
+        
+      - condition: "depth == 'deep' AND subtopics.length > 3"
+        action: "parallelize_subtopics"
+        reason: "Speed up deep research with parallelization"
+    
+    aggregation:
+      strategy: "merge_and_dedupe"
+      conflict_resolution: "confidence_weighted"
+      timeout_ms: 30000
+  
+  caching:
+    enabled: true
+    ttl_seconds: 3600             # 1 hour default
+    cache_key_strategy: "query_hash"
+    invalidation:
+      - on_source_update
+      - on_ttl_expire
+      - on_explicit_request
+  
+  quality_controls:
+    # Ensure research quality
+    min_sources: 2                # Minimum sources for factual claims
+    require_corroboration: true   # Cross-check important facts
+    bias_detection: true          # Flag potentially biased sources
+    fact_check_threshold: 0.8     # Facts above this get fact-checked
+    
+    source_reliability:
+      # Known reliable sources (boost confidence)
+      trusted:
+        - "*.gov"
+        - "*.edu"
+        - "wikipedia.org"
+        - "arxiv.org"
+      # Known unreliable (reduce confidence)
+      untrusted:
+        - "*.blogspot.com"
+        - pattern: "contains:sponsored"
+  
+  outputs:
+    - name: research_result
+      description: "Complete research output"
+      schema:
+        query: string
+        summary: string
+        findings: array
+        sources: array
+        confidence: float
+        limitations: array
+        follow_up_questions: array
+        
+    - name: delegated_result
+      description: "Result from delegated sub-task"
+      schema:
+        parent_task_id: string
+        scope: object
+        findings: array
+        sources: array
+  
+  dependencies:
+    agents:
+      - orchestrator_agent       # For complex multi-step research
+    capabilities:
+      - search:web
+      - rag:query
+      - llm:summarize

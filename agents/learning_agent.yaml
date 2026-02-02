@@ -1,0 +1,312 @@
+# agents/learning_agent.yaml
+# Manages the training loop and model lifecycle
+
+agent:
+  id: learning_agent
+  version: "1.0"
+  type: deliberative
+  
+  description: |
+    Manages the complete machine learning lifecycle including sample collection,
+    dataset curation, training coordination (via LlamaFarm or local), model
+    evaluation, and deployment. Acts as the ML operations center for the node mesh.
+    
+    Monitors model performance drift and triggers retraining when accuracy degrades.
+    Coordinates with vision_agent, anomaly_agent, and others to collect training data.
+  
+  triggers:
+    - name: sample_threshold
+      description: "Collected samples reached training threshold"
+      params:
+        sample_type: string       # "vision" | "anomaly" | "classification" | etc.
+        sample_count: integer
+        storage_path: string
+        
+    - name: schedule
+      description: "Scheduled training run"
+      params:
+        schedule_id: string
+        model_id: string
+        training_config: object
+        
+    - name: accuracy_drift
+      description: "Model accuracy has degraded below threshold"
+      params:
+        model_id: string
+        current_accuracy: float
+        baseline_accuracy: float
+        drift_percentage: float
+        
+    - name: manual
+      description: "Manual training request"
+      params:
+        action: string            # "train" | "evaluate" | "deploy" | "rollback"
+        model_id: string
+        config: object
+        
+    - name: sample_submitted
+      description: "New labeled sample submitted for collection"
+      params:
+        sample_type: string
+        sample_data: object
+        label: object
+        source_agent: string
+  
+  tools:
+    required:
+      - collect_samples         # Gather and organize training data
+      - request_training        # Submit training job to LlamaFarm
+      - deploy_model            # Deploy trained model to nodes
+    optional:
+      - evaluate_model          # Run evaluation metrics
+      - curate_dataset          # Clean and balance dataset
+      - query_llamafarm         # Check LlamaFarm job status
+      - rollback_model          # Revert to previous model version
+      - notify                  # Send status notifications
+      - query_mesh              # Find nodes for deployment
+      - benchmark_model         # Run performance benchmarks
+  
+  default_params:
+    # Sample collection
+    min_samples_for_training: 100
+    max_samples_per_batch: 10000
+    sample_validation_enabled: true
+    auto_balance_classes: true
+    
+    # Training configuration
+    default_epochs: 10
+    early_stopping_patience: 3
+    validation_split: 0.2
+    
+    # Drift detection
+    drift_threshold_percentage: 5.0
+    drift_check_interval_hours: 24
+    min_inferences_for_drift: 100
+    
+    # Deployment
+    canary_deployment: true
+    canary_percentage: 10
+    canary_duration_hours: 24
+    rollback_on_regression: true
+  
+  instructions: |
+    ## Learning Pipeline
+    
+    ### Sample Collection Phase
+    
+    1. **Sample Intake**
+       - Receive samples from agents (vision, anomaly, etc.)
+       - Validate sample format and quality
+       - Store in appropriate sample storage
+       - Update sample counts per type/class
+    
+    2. **Dataset Curation** (periodic or on-demand)
+       - Analyze class distribution
+       - Remove duplicates and near-duplicates
+       - Identify and handle outliers
+       - Balance classes (oversample minority, undersample majority)
+       - Split into train/validation/test sets
+    
+    ### Training Phase
+    
+    3. **Training Trigger Evaluation**
+       - sample_threshold: enough new samples collected
+       - schedule: scheduled training time
+       - accuracy_drift: model performance degraded
+       - manual: explicit request
+    
+    4. **Training Job Submission**
+       - Prepare training configuration
+       - Package dataset for transfer
+       - Submit to LlamaFarm via request_training
+       - Monitor job progress
+       - Handle failures and retries
+    
+    5. **Training Monitoring**
+       ```
+       while training_in_progress:
+         - Poll LlamaFarm for status
+         - Log metrics (loss, accuracy, etc.)
+         - Check for early stopping conditions
+         - Handle interruptions
+       ```
+    
+    ### Evaluation Phase
+    
+    6. **Model Evaluation**
+       - Retrieve trained model from LlamaFarm
+       - Run evaluation on held-out test set
+       - Calculate metrics: accuracy, precision, recall, F1
+       - Compare against baseline model
+       - Generate evaluation report
+    
+    7. **Quality Gates**
+       - Check: new model accuracy > baseline?
+       - Check: no regression on critical classes?
+       - Check: inference latency acceptable?
+       - Check: model size within limits?
+       - If all pass: proceed to deployment
+       - If fail: notify and await manual decision
+    
+    ### Deployment Phase
+    
+    8. **Deployment Strategy**
+       
+       a. **Canary Deployment** (default)
+          - Deploy to canary_percentage of traffic
+          - Monitor for canary_duration
+          - If no regression: full rollout
+          - If regression: automatic rollback
+       
+       b. **Blue-Green Deployment**
+          - Deploy new model alongside old
+          - Switch traffic atomically
+          - Keep old model for quick rollback
+       
+       c. **Rolling Deployment**
+          - Update nodes one at a time
+          - Health check after each
+          - Pause on failures
+    
+    9. **Post-Deployment Monitoring**
+       - Track inference accuracy in production
+       - Collect samples for next training cycle
+       - Detect and alert on drift
+  
+  resource_profile:
+    min_memory_mb: 256
+    typical_memory_mb: 512
+    requires_gpu: false           # Orchestration only; LlamaFarm does heavy lifting
+    typical_latency_ms: 1000      # Per operation
+  
+  sample_management:
+    storage_locations:
+      vision: "local:learning_samples/vision"
+      anomaly: "local:learning_samples/anomaly"
+      classification: "local:learning_samples/classification"
+      
+    retention:
+      raw_samples_days: 30
+      curated_datasets_days: 365
+      model_artifacts_days: 365
+      
+    quality_checks:
+      - name: format_validation
+        description: "Verify sample matches expected schema"
+      - name: duplicate_detection
+        description: "Check for exact and near duplicates"
+      - name: outlier_detection
+        description: "Identify statistical outliers"
+      - name: label_consistency
+        description: "Check for label conflicts"
+  
+  llamafarm_integration:
+    # Configuration for LlamaFarm training backend
+    
+    connection:
+      endpoint: "${LLAMAFARM_ENDPOINT}"
+      auth_method: "api_key"
+      
+    job_types:
+      fine_tune:
+        description: "Fine-tune existing model"
+        typical_duration_hours: 2
+      train_from_scratch:
+        description: "Train new model"
+        typical_duration_hours: 8
+      distillation:
+        description: "Distill large model to small"
+        typical_duration_hours: 4
+        
+    resource_requests:
+      default:
+        gpu_type: "any"
+        gpu_count: 1
+        memory_gb: 16
+      large_model:
+        gpu_type: "a100"
+        gpu_count: 4
+        memory_gb: 64
+  
+  drift_detection:
+    methods:
+      - name: accuracy_tracking
+        description: "Track prediction accuracy over time"
+        window_size: 1000
+        
+      - name: distribution_shift
+        description: "Detect input distribution changes"
+        method: "ks_test"
+        
+      - name: confidence_degradation
+        description: "Monitor average confidence scores"
+        threshold_drop: 0.1
+        
+    alerting:
+      on_drift_detected:
+        - notify_admin
+        - trigger_evaluation
+        - consider_retraining
+  
+  model_registry:
+    # Track all model versions
+    storage: "local:model_registry"
+    metadata:
+      - model_id
+      - version
+      - training_date
+      - dataset_hash
+      - metrics
+      - deployment_status
+      - nodes_deployed
+    versioning:
+      strategy: "semantic"        # major.minor.patch
+      auto_increment: "patch"
+  
+  outputs:
+    - name: training_result
+      description: "Training job completion"
+      schema:
+        model_id: string
+        version: string
+        metrics:
+          accuracy: float
+          precision: float
+          recall: float
+          f1: float
+          loss: float
+        training_duration_seconds: integer
+        dataset_size: integer
+        
+    - name: deployment_result
+      description: "Model deployment status"
+      schema:
+        model_id: string
+        version: string
+        deployment_strategy: string
+        nodes_deployed: array
+        status: string
+        rollback_available: boolean
+        
+    - name: drift_alert
+      description: "Model drift detection alert"
+      schema:
+        model_id: string
+        drift_type: string
+        current_value: float
+        baseline_value: float
+        severity: string
+        recommended_action: string
+  
+  dependencies:
+    agents:
+      - vision_agent            # Sample source
+      - anomaly_agent           # Sample source
+      - notification_agent      # Status notifications
+      - orchestrator_agent      # Complex training workflows
+      - provisioning_agent      # Model deployment to new nodes
+    capabilities:
+      - llamafarm:train
+      - llamafarm:evaluate
+      - storage:samples
+      - storage:models

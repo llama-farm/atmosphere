@@ -1,0 +1,174 @@
+# agents/vision_agent.yaml
+# Reactive agent for image/video analysis with escalation and learning support
+
+agent:
+  id: vision_agent
+  version: "1.0"
+  type: reactive
+  
+  description: |
+    Analyzes visual input for object detection, classification, and anomaly detection.
+    Supports escalation to larger models when confidence is low. Automatically collects
+    low-confidence samples for future training via the learning_agent.
+    
+    Designed for edge deployment with resource-constrained inference, falling back to
+    more capable models (local or cloud) when needed.
+  
+  triggers:
+    - name: new_frame
+      description: "New camera frame available for processing"
+      params:
+        frame_ref: string      # Reference to frame in local storage or stream buffer
+        camera_id: string      # Identifier of source camera
+        timestamp: integer     # Unix timestamp of capture
+        metadata:              # Optional camera metadata
+          resolution: string
+          exposure: float
+          
+    - name: motion_detected
+      description: "Motion detected in camera view, triggered by hardware or software detector"
+      params:
+        frame_ref: string
+        camera_id: string
+        motion_region: bbox    # {x, y, width, height} of detected motion
+        motion_score: float    # 0.0-1.0 motion intensity
+        
+    - name: manual
+      description: "Manual activation with arbitrary image for analysis"
+      params:
+        image_ref: string      # Path or URL to image
+        task: string           # Specific task: "detect", "classify", "describe", "count"
+        focus_region: bbox     # Optional region of interest
+  
+  tools:
+    required:
+      - detect_objects        # Run object detection model
+      - classify              # Run classification model
+    optional:
+      - segment               # Instance/semantic segmentation
+      - notify                # Send notification via notification_agent
+      - log_to_database       # Store results in time-series DB
+      - store_sample          # Save sample for learning_agent
+      - request_escalation    # Forward to higher-capability model
+  
+  default_params:
+    confidence_threshold: 0.8
+    max_objects: 50
+    escalation_enabled: true
+    learning_enabled: true
+    nms_threshold: 0.45           # Non-max suppression overlap threshold
+    min_object_size: 32           # Minimum object dimension in pixels
+    output_format: "structured"   # "structured" | "natural_language"
+  
+  instructions: |
+    ## Processing Pipeline
+    
+    1. **Input Validation**
+       - Verify frame_ref is accessible
+       - Check image dimensions and format
+       - Apply preprocessing (resize, normalize) as needed
+    
+    2. **Object Detection**
+       - Run detect_objects with local model
+       - Apply NMS with configured threshold
+       - Filter objects below min_object_size
+    
+    3. **Classification** (if requested or ambiguous detection)
+       - For each detected object, run classify
+       - Aggregate confidence scores
+    
+    4. **Confidence Evaluation**
+       - If ALL detections have confidence > threshold: proceed to output
+       - If ANY detection has confidence < threshold:
+         a. If escalation_enabled: trigger escalation flow
+         b. Else: mark low-confidence items in output
+    
+    5. **Escalation Flow** (when triggered)
+       - Package frame + detection context
+       - Forward to escalation_target capability via request_escalation
+       - Wait for response (respect timeout_ms)
+       - If timeout: use fallback_capability or return best-effort result
+       - Merge escalated results with local results
+    
+    6. **Learning Sample Collection** (when enabled)
+       - If learning_enabled AND confidence < learning.sample_threshold:
+         - Store frame + detections via store_sample
+         - Include metadata for learning_agent
+         - Increment sample counter
+    
+    7. **Output**
+       - Return structured detection results
+       - Include confidence scores, bounding boxes, labels
+       - Log to database if configured
+       - Trigger notifications for configured object classes
+  
+  resource_profile:
+    min_memory_mb: 128
+    typical_memory_mb: 256
+    peak_memory_mb: 512          # During model loading
+    requires_gpu: false          # Works on CPU, faster with GPU
+    gpu_memory_mb: 256           # If GPU available
+    typical_latency_ms: 200      # Per-frame on edge device
+    max_latency_ms: 1000         # Before escalation timeout
+  
+  escalation:
+    threshold: 0.85              # Escalate if max confidence below this
+    target_capability: "vision:large_model"
+    fallback_capability: "vision:cloud"
+    timeout_ms: 5000
+    retry_count: 1
+    circuit_breaker:
+      failure_threshold: 5       # Failures before opening circuit
+      reset_timeout_ms: 30000    # Time before retry after circuit opens
+  
+  learning:
+    sample_storage: "local:learning_samples/vision"
+    sample_threshold: 0.7        # Collect samples below this confidence
+    batch_trigger_count: 100     # Notify learning_agent after this many samples
+    max_samples_per_class: 500   # Cap per class to avoid imbalance
+    metadata_fields:
+      - label
+      - confidence
+      - bounding_boxes
+      - source_model
+      - camera_id
+      - timestamp
+      - escalation_result       # If escalated, what was the answer?
+  
+  outputs:
+    - name: detection_result
+      description: "Structured detection output"
+      schema:
+        objects:
+          type: array
+          items:
+            label: string
+            confidence: float
+            bbox: {x: int, y: int, width: int, height: int}
+            attributes: object
+        frame_ref: string
+        processing_time_ms: integer
+        escalated: boolean
+        model_used: string
+  
+  notifications:
+    # Trigger notification_agent for specific detections
+    rules:
+      - condition: "object.label == 'person' AND camera_id IN ['front_door', 'driveway']"
+        priority: high
+        channels: ["push", "sms"]
+      - condition: "object.label IN ['fire', 'smoke']"
+        priority: critical
+        channels: ["push", "sms", "email"]
+      - condition: "object.label == 'package'"
+        priority: normal
+        channels: ["push"]
+  
+  dependencies:
+    agents:
+      - notification_agent     # For sending alerts
+      - learning_agent         # For sample collection coordination
+    capabilities:
+      - vision:small_model     # Local inference (required)
+      - vision:large_model     # Escalation target (optional)
+      - vision:cloud           # Cloud fallback (optional)

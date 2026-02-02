@@ -1,0 +1,66 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "AtmosphereProject",
+  "description": "Parsed project metadata for Atmosphere mesh routing",
+  "type": "object",
+  "required": ["namespace", "name", "models", "domain", "capabilities"],
+  "properties": {
+    "namespace": {
+      "type": "string",
+      "description": "Project namespace (org/tenant)"
+    },
+    "name": {
+      "type": "string",
+      "description": "Project name"
+    },
+    "models": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Available model aliases"
+    },
+    "domain": {
+      "type": "string",
+      "description": "Primary domain/topic"
+    },
+    "capabilities": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": ["chat", "rag", "tools", "embeddings", "vision", "structured", "streaming"]
+      },
+      "description": "What the project can do"
+    },
+    "complexity": {
+      "type": "string",
+      "enum": ["simple", "rag-enabled", "agentic", "specialized"],
+      "description": "Project complexity level"
+    },
+    "rag_summary": {
+      "type": ["string", "null"],
+      "description": "Brief description of RAG data"
+    },
+    "topics": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Key topics/keywords"
+    },
+    "description": {
+      "type": "string",
+      "description": "One-sentence project description"
+    },
+    "source_path": {
+      "type": "string",
+      "description": "Path to original llamafarm.yaml"
+    },
+    "parsed_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "When this was parsed"
+    },
+    "nodes": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Nodes where this project is available"
+    }
+  }
+}

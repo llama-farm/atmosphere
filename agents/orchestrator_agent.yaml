@@ -1,0 +1,267 @@
+# agents/orchestrator_agent.yaml
+# Coordinates multi-step workflows and manages child agents across the mesh
+
+agent:
+  id: orchestrator_agent
+  version: "1.0"
+  type: orchestrator
+  
+  description: |
+    Master coordinator for complex, multi-step workflows that require multiple
+    agents working in sequence or parallel. Manages task decomposition, agent
+    spawning, result aggregation, and error recovery across the node mesh.
+    
+    Acts as the "brain" for workflows that exceed the scope of a single reactive
+    or deliberative agent. Maintains workflow state and handles failures gracefully.
+  
+  triggers:
+    - name: workflow_start
+      description: "Explicit workflow initiation with defined steps"
+      params:
+        workflow_id: string
+        workflow_def: object      # Workflow definition or reference
+        inputs: object
+        priority: string
+        deadline: integer
+        
+    - name: complex_intent
+      description: "Natural language intent requiring orchestration"
+      params:
+        intent: string
+        context: object
+        constraints: object
+        
+    - name: agent_callback
+      description: "Child agent reporting completion or failure"
+      params:
+        task_id: string
+        agent_id: string
+        status: string            # "complete" | "failed" | "timeout"
+        result: object
+        error: object
+        
+    - name: escalation
+      description: "Escalation from another agent requiring coordination"
+      params:
+        source_agent: string
+        escalation_type: string
+        context: object
+  
+  tools:
+    required:
+      - spawn_agent             # Create and start agent instance
+      - wait_for                # Wait for agent/task completion
+      - aggregate_results       # Combine results from multiple agents
+    optional:
+      - notify                  # Send notifications
+      - query_mesh              # Query node mesh for capabilities
+      - checkpoint_workflow     # Save workflow state
+      - rollback_workflow       # Revert to previous checkpoint
+      - cancel_agent            # Terminate running agent
+      - retry_task              # Retry failed task
+      - delegate_to_node        # Send task to specific node
+  
+  default_params:
+    # Workflow execution
+    max_concurrent_agents: 10
+    default_timeout_ms: 60000
+    checkpoint_interval: 5         # Checkpoint every N steps
+    
+    # Retry configuration
+    max_retries: 3
+    retry_backoff_ms: 1000
+    retry_backoff_multiplier: 2.0
+    
+    # Resource management
+    respect_node_capacity: true
+    prefer_local_execution: true
+    load_balance_strategy: "round_robin"  # "round_robin" | "least_loaded" | "capability_match"
+  
+  instructions: |
+    ## Orchestration Pipeline
+    
+    1. **Workflow Intake**
+       - Receive workflow request (explicit or from intent)
+       - If complex_intent: decompose into workflow steps
+       - Validate workflow definition
+       - Create workflow instance with unique ID
+    
+    2. **Planning Phase**
+       - Analyze workflow DAG (directed acyclic graph)
+       - Identify parallelizable steps
+       - Query mesh for required capabilities
+       - Map steps to agents and nodes
+       - Create execution plan
+    
+    3. **Resource Allocation**
+       - Check node capacity for required agents
+       - Reserve resources if needed
+       - Select optimal nodes for each task
+       - Handle resource conflicts
+    
+    4. **Execution Loop**
+       ```
+       while workflow not complete:
+         - Identify ready tasks (dependencies satisfied)
+         - For each ready task:
+           - Spawn agent on appropriate node
+           - Register callback
+           - Update workflow state
+         - Wait for callbacks or timeout
+         - Process results
+         - Check for failures
+         - Checkpoint if interval reached
+       ```
+    
+    5. **Result Handling**
+       
+       a. **Success Path**
+          - Aggregate results from completed agents
+          - Transform as needed for next steps
+          - Pass to dependent tasks
+       
+       b. **Failure Handling**
+          - Log failure details
+          - Check retry policy
+          - If retries remaining: retry with backoff
+          - If retries exhausted: evaluate alternatives
+            - Can skip optional step?
+            - Can use fallback agent?
+            - Must fail workflow?
+          - Rollback if necessary
+    
+    6. **Completion**
+       - Aggregate final results
+       - Clean up resources
+       - Archive workflow state
+       - Notify requester
+       - Return comprehensive result
+  
+  resource_profile:
+    min_memory_mb: 128
+    typical_memory_mb: 256
+    requires_gpu: false
+    typical_latency_ms: 100       # Orchestration overhead per step
+    max_concurrent_workflows: 50
+  
+  workflow_patterns:
+    # Pre-defined workflow patterns
+    
+    sequential:
+      description: "Steps execute one after another"
+      example: "A -> B -> C"
+      
+    parallel:
+      description: "Steps execute simultaneously"
+      example: "[A, B, C] -> D"
+      
+    conditional:
+      description: "Branch based on result"
+      example: "A -> (if success: B, else: C)"
+      
+    loop:
+      description: "Repeat until condition"
+      example: "while !done: A -> B"
+      
+    map_reduce:
+      description: "Parallel processing with aggregation"
+      example: "map(items, A) -> reduce(B)"
+  
+  state_management:
+    persistence: true
+    storage: "local:workflow_state"
+    checkpoint_fields:
+      - workflow_id
+      - current_step
+      - completed_steps
+      - pending_tasks
+      - intermediate_results
+      - error_log
+    recovery:
+      on_crash: "resume_from_checkpoint"
+      on_timeout: "retry_or_fail"
+  
+  mesh_coordination:
+    # How to work with the node mesh
+    
+    capability_routing:
+      # Route tasks to nodes with required capabilities
+      enabled: true
+      cache_capability_map: true
+      cache_ttl_seconds: 300
+      
+    load_balancing:
+      enabled: true
+      metrics:
+        - cpu_usage
+        - memory_usage
+        - active_agents
+      threshold_overloaded: 0.8
+      
+    affinity:
+      # Prefer co-locating related tasks
+      enabled: true
+      rules:
+        - pattern: "vision_*"
+          prefer: "nodes_with_gpu"
+        - pattern: "database_*"
+          prefer: "nodes_with_db_access"
+  
+  error_handling:
+    strategies:
+      - type: retry
+        conditions:
+          - "error.type == 'timeout'"
+          - "error.type == 'transient'"
+        max_attempts: 3
+        
+      - type: fallback
+        conditions:
+          - "error.type == 'capability_unavailable'"
+        action: "use_alternative_capability"
+        
+      - type: skip
+        conditions:
+          - "task.optional == true"
+          - "error.type == 'non_critical'"
+        action: "continue_workflow"
+        
+      - type: escalate
+        conditions:
+          - "error.type == 'critical'"
+          - "retries_exhausted == true"
+        action: "notify_and_pause"
+  
+  outputs:
+    - name: workflow_result
+      description: "Final workflow output"
+      schema:
+        workflow_id: string
+        status: string            # "complete" | "failed" | "partial"
+        result: object
+        steps_completed: integer
+        steps_failed: integer
+        duration_ms: integer
+        agent_invocations: array
+        
+    - name: workflow_status
+      description: "Intermediate status update"
+      schema:
+        workflow_id: string
+        progress: float           # 0.0 - 1.0
+        current_step: string
+        active_agents: array
+        errors: array
+  
+  dependencies:
+    agents:
+      - vision_agent            # Can spawn for visual tasks
+      - anomaly_agent           # Can spawn for monitoring tasks
+      - research_agent          # Can spawn for information tasks
+      - learning_agent          # Can spawn for ML tasks
+      - notification_agent      # For workflow notifications
+      - provisioning_agent      # For resource provisioning
+    capabilities:
+      - mesh:query
+      - mesh:spawn
+      - state:persist

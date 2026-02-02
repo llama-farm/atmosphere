@@ -1,0 +1,394 @@
+# agents/provisioning_agent.yaml
+# Auto-provisions new devices joining the mesh
+
+agent:
+  id: provisioning_agent
+  version: "1.0"
+  type: reactive
+  
+  description: |
+    Automatically provisions new nodes when they join the mesh. Detects hardware
+    capabilities, determines appropriate mission assignment, and deploys necessary
+    models and agents. Ensures new nodes are production-ready with minimal manual
+    intervention.
+    
+    Maintains a registry of node templates and mission profiles for consistent
+    fleet management.
+  
+  triggers:
+    - name: node_join
+      description: "New node has joined the mesh"
+      params:
+        node_id: string
+        node_info:
+          hostname: string
+          platform: string        # "linux" | "darwin" | "windows" | "rpi" | "jetson"
+          architecture: string    # "x86_64" | "arm64" | "armv7"
+          reported_capabilities: array
+        join_timestamp: integer
+        
+    - name: node_update
+      description: "Existing node reports hardware or capability changes"
+      params:
+        node_id: string
+        changes: object
+        
+    - name: manual_provision
+      description: "Manual provisioning request"
+      params:
+        node_id: string
+        mission: string
+        force: boolean            # Override existing config
+        
+    - name: fleet_update
+      description: "Push update to fleet of nodes"
+      params:
+        target_nodes: array       # Node IDs or "all" or selector
+        update_type: string       # "model" | "agent" | "config"
+        payload: object
+  
+  tools:
+    required:
+      - detect_hardware         # Probe node for hardware capabilities
+      - lookup_mission          # Determine mission based on capabilities
+      - deploy_agents           # Deploy agent configurations
+    optional:
+      - deploy_models           # Deploy ML models to node
+      - configure_node          # Set node configuration
+      - test_node               # Run health/capability tests
+      - register_node           # Add to node registry
+      - notify                  # Notify about provisioning status
+      - query_mesh              # Get mesh state
+      - rollback_provision      # Revert provisioning
+  
+  default_params:
+    # Discovery
+    hardware_probe_timeout_ms: 30000
+    probe_retries: 3
+    
+    # Provisioning
+    auto_provision: true
+    require_approval: false       # Require human approval for new nodes
+    dry_run_first: true           # Simulate before actual provision
+    
+    # Deployment
+    parallel_deployments: 5
+    deployment_timeout_ms: 300000
+    verify_after_deploy: true
+    
+    # Safety
+    max_nodes_per_hour: 10        # Rate limit new node provisioning
+    quarantine_unknown: true      # Quarantine nodes that don't match profiles
+  
+  instructions: |
+    ## Provisioning Pipeline
+    
+    1. **Node Discovery**
+       - Receive node_join trigger
+       - Validate node_id is unique (or known returning node)
+       - Log join event
+    
+    2. **Hardware Detection**
+       - Execute detect_hardware on new node
+       - Probe for:
+         - CPU: cores, architecture, speed
+         - Memory: total, available
+         - GPU: presence, type, VRAM
+         - Storage: available space
+         - Network: interfaces, bandwidth
+         - Peripherals: cameras, sensors, GPIO
+       - Timeout gracefully if probe fails
+    
+    3. **Capability Assessment**
+       ```
+       capabilities = []
+       
+       if gpu.present and gpu.vram >= 4GB:
+         capabilities.append("vision:inference")
+         capabilities.append("ml:local_training")
+       
+       if camera.present:
+         capabilities.append("vision:capture")
+       
+       if memory >= 4GB:
+         capabilities.append("llm:small")
+       
+       if memory >= 16GB:
+         capabilities.append("llm:medium")
+       
+       if sensors.present:
+         capabilities.append("sensing:" + sensor_type)
+       ```
+    
+    4. **Mission Assignment**
+       - Query mission profiles for matching capabilities
+       - Consider:
+         - Required capabilities for mission
+         - Desired capabilities (nice to have)
+         - Resource requirements
+         - Fleet balance (don't over-assign one mission)
+       - Select best-fit mission
+       - If no match: assign "general" or quarantine
+    
+    5. **Provisioning Plan**
+       Create deployment plan:
+       - Agents to deploy
+       - Models to deploy
+       - Configuration to apply
+       - Verification tests to run
+    
+    6. **Dry Run** (if enabled)
+       - Simulate deployment
+       - Check for conflicts
+       - Estimate resource usage
+       - Report issues before actual deploy
+    
+    7. **Deployment Execution**
+       
+       a. **Agent Deployment**
+          - For each agent in mission profile:
+            - Check dependencies satisfied
+            - Deploy agent configuration
+            - Verify agent can start
+       
+       b. **Model Deployment**
+          - For each model required:
+            - Check storage space
+            - Transfer model files
+            - Verify model loads correctly
+       
+       c. **Configuration**
+          - Apply node-specific config
+          - Set environment variables
+          - Configure networking
+    
+    8. **Verification**
+       - Run health checks
+       - Test each deployed capability
+       - Verify mesh connectivity
+       - Check resource utilization
+    
+    9. **Registration**
+       - Add to node registry with full profile
+       - Update mesh capability map
+       - Notify relevant agents of new node
+    
+    10. **Completion**
+        - Log provisioning result
+        - Notify administrators if configured
+        - Mark node as "active" in registry
+  
+  resource_profile:
+    min_memory_mb: 128
+    typical_memory_mb: 256
+    requires_gpu: false
+    typical_latency_ms: 5000      # Full provisioning is slow
+  
+  hardware_profiles:
+    # Known hardware profiles for quick matching
+    
+    raspberry_pi_4:
+      platform: "rpi"
+      architecture: "arm64"
+      memory_range: [2048, 8192]
+      capabilities:
+        - sensing:gpio
+        - vision:capture
+        - ml:tflite
+      typical_missions: ["sensor_node", "camera_node"]
+      
+    jetson_nano:
+      platform: "jetson"
+      architecture: "arm64"
+      gpu: "tegra"
+      memory_range: [2048, 4096]
+      capabilities:
+        - vision:inference
+        - vision:capture
+        - ml:tensorrt
+      typical_missions: ["vision_edge", "ml_inference"]
+      
+    jetson_orin:
+      platform: "jetson"
+      architecture: "arm64"
+      gpu: "ampere"
+      memory_range: [8192, 65536]
+      capabilities:
+        - vision:inference
+        - ml:local_training
+        - llm:medium
+      typical_missions: ["ml_powerhouse", "inference_hub"]
+      
+    generic_x86_server:
+      platform: "linux"
+      architecture: "x86_64"
+      memory_range: [16384, 524288]
+      capabilities:
+        - compute:general
+        - storage:large
+      typical_missions: ["coordinator", "storage_node", "training_node"]
+      
+    mac_apple_silicon:
+      platform: "darwin"
+      architecture: "arm64"
+      memory_range: [8192, 196608]
+      capabilities:
+        - ml:mps
+        - llm:large
+        - compute:general
+      typical_missions: ["development", "llm_inference"]
+  
+  mission_profiles:
+    # Define what each mission requires
+    
+    sensor_node:
+      description: "Basic sensing and reporting"
+      required_capabilities:
+        - sensing:*
+      agents:
+        - anomaly_agent
+      models: []
+      config:
+        reporting_interval_seconds: 60
+        
+    camera_node:
+      description: "Video capture with optional edge processing"
+      required_capabilities:
+        - vision:capture
+      optional_capabilities:
+        - vision:inference
+      agents:
+        - vision_agent
+      models:
+        - name: "yolov8n"
+          condition: "has_capability('vision:inference')"
+      config:
+        frame_rate: 15
+        resolution: "1080p"
+        
+    vision_edge:
+      description: "Full vision processing at the edge"
+      required_capabilities:
+        - vision:capture
+        - vision:inference
+      agents:
+        - vision_agent
+        - anomaly_agent
+      models:
+        - name: "yolov8s"
+        - name: "classifier_resnet18"
+      config:
+        frame_rate: 30
+        inference_batch_size: 1
+        
+    inference_hub:
+      description: "Central inference for multiple cameras"
+      required_capabilities:
+        - vision:inference
+        - compute:general
+      agents:
+        - vision_agent
+        - orchestrator_agent
+      models:
+        - name: "yolov8m"
+        - name: "classifier_resnet50"
+      config:
+        max_concurrent_streams: 8
+        
+    coordinator:
+      description: "Mesh coordination and orchestration"
+      required_capabilities:
+        - compute:general
+        - storage:large
+      agents:
+        - orchestrator_agent
+        - learning_agent
+        - notification_agent
+        - provisioning_agent
+      models: []
+      config:
+        is_coordinator: true
+        
+    general:
+      description: "Fallback for unmatched nodes"
+      required_capabilities: []
+      agents:
+        - anomaly_agent
+      models: []
+      config:
+        limited_mode: true
+  
+  quarantine:
+    # Handle unknown or problematic nodes
+    enabled: true
+    conditions:
+      - "hardware_probe_failed"
+      - "no_matching_mission"
+      - "security_check_failed"
+    actions:
+      - isolate_from_mesh
+      - notify_admin
+      - schedule_manual_review
+    auto_release: false
+  
+  fleet_management:
+    # Bulk operations across nodes
+    
+    update_strategies:
+      rolling:
+        batch_size: 5
+        delay_between_batches_seconds: 60
+        halt_on_failure: true
+      canary:
+        canary_count: 2
+        canary_duration_hours: 24
+        proceed_on_success: true
+      immediate:
+        parallel: true
+        use_for: ["critical_security_patches"]
+    
+    health_monitoring:
+      check_interval_seconds: 300
+      metrics:
+        - cpu_usage
+        - memory_usage
+        - agent_health
+        - model_health
+      alert_on:
+        - metric: cpu_usage
+          threshold: 0.9
+          duration_seconds: 300
+        - metric: agent_health
+          status: "unhealthy"
+  
+  outputs:
+    - name: provisioning_result
+      description: "Result of node provisioning"
+      schema:
+        node_id: string
+        status: string            # "provisioned" | "quarantined" | "failed"
+        mission: string
+        capabilities: array
+        agents_deployed: array
+        models_deployed: array
+        verification_passed: boolean
+        warnings: array
+        
+    - name: fleet_update_result
+      description: "Result of fleet update operation"
+      schema:
+        update_id: string
+        nodes_targeted: integer
+        nodes_succeeded: integer
+        nodes_failed: integer
+        failures: array
+  
+  dependencies:
+    agents:
+      - learning_agent           # For model deployment coordination
+      - notification_agent       # For provisioning notifications
+    capabilities:
+      - mesh:query
+      - mesh:deploy
+      - node:probe
+      - node:configure

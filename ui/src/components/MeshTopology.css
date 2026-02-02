@@ -1,0 +1,141 @@
+.mesh-topology {
+  padding: 2rem;
+  max-width: 1600px;
+  margin: 0 auto;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.topology-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1.5rem;
+  flex-wrap: wrap;
+  gap: 1rem;
+}
+
+.topology-header h1 {
+  font-size: 2.5rem;
+  background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.topology-legend {
+  display: flex;
+  gap: 2rem;
+  align-items: center;
+}
+
+.legend-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.875rem;
+  color: var(--text-secondary);
+}
+
+.legend-circle {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+}
+
+.legend-circle.leader {
+  background: linear-gradient(135deg, #f59e0b, #ef4444);
+  border-color: #f59e0b;
+  box-shadow: 0 0 10px rgba(245, 158, 11, 0.5);
+}
+
+.legend-circle.active {
+  background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+  border-color: #3b82f6;
+}
+
+.legend-badge {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #8b5cf6;
+  border: 2px solid var(--bg-primary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.topology-canvas {
+  flex: 1;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 1rem;
+  overflow: hidden;
+  position: relative;
+  min-height: 600px;
+}
+
+.topology-canvas svg {
+  background: 
+    radial-gradient(circle at 20% 30%, rgba(59, 130, 246, 0.05) 0%, transparent 50%),
+    radial-gradient(circle at 80% 70%, rgba(139, 92, 246, 0.05) 0%, transparent 50%);
+}
+
+.mesh-node {
+  cursor: pointer;
+  transition: filter 0.2s;
+}
+
+.mesh-node:hover {
+  filter: brightness(1.2);
+}
+
+.mesh-link {
+  transition: stroke-opacity 0.2s;
+}
+
+.mesh-link:hover {
+  stroke-opacity: 1;
+  stroke: var(--accent-primary);
+}
+
+.glow-node circle {
+  animation: glow 2s ease-in-out infinite;
+  filter: drop-shadow(0 0 8px rgba(245, 158, 11, 0.6));
+}
+
+.topology-hint {
+  text-align: center;
+  padding: 1rem;
+  color: var(--text-tertiary);
+  font-size: 0.875rem;
+}
+
+@media (max-width: 768px) {
+  .mesh-topology {
+    padding: 1rem;
+  }
+
+  .topology-header {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .topology-header h1 {
+    font-size: 1.75rem;
+  }
+
+  .topology-legend {
+    flex-wrap: wrap;
+    gap: 1rem;
+  }
+
+  .topology-canvas {
+    min-height: 400px;
+  }
+}

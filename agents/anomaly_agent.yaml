@@ -1,0 +1,234 @@
+# agents/anomaly_agent.yaml
+# Reactive agent for monitoring sensor streams and detecting anomalies
+
+agent:
+  id: anomaly_agent
+  version: "1.0"
+  type: reactive
+  
+  description: |
+    Monitors continuous sensor data streams for anomalies, trend deviations, and
+    threshold breaches. Supports any numeric time-series data including vibration,
+    temperature, pressure, humidity, power consumption, and custom metrics.
+    
+    Uses statistical methods (z-score, IQR) and optional ML models for anomaly
+    detection. Maintains rolling baselines and adapts to seasonal patterns.
+  
+  triggers:
+    - name: sensor_reading
+      description: "New sensor data point received"
+      params:
+        sensor_id: string
+        value: float
+        timestamp: integer
+        unit: string
+        metadata: object
+        
+    - name: periodic_check
+      description: "Scheduled check of sensor health and trends"
+      params:
+        sensor_ids: array       # List of sensors to check
+        check_type: string      # "health" | "trend" | "full"
+        
+    - name: threshold_breach
+      description: "Hardware-triggered threshold alert"
+      params:
+        sensor_id: string
+        value: float
+        threshold_type: string  # "high" | "low" | "rate_of_change"
+        threshold_value: float
+        
+    - name: manual
+      description: "Manual anomaly analysis request"
+      params:
+        sensor_id: string
+        time_range:
+          start: integer
+          end: integer
+        analysis_type: string   # "detect" | "explain" | "forecast"
+  
+  tools:
+    required:
+      - query_sensor           # Fetch historical sensor data
+      - analyze_trend          # Statistical trend analysis
+    optional:
+      - notify                 # Send alerts via notification_agent
+      - log                    # Write to anomaly log
+      - query_database         # Access external data sources
+      - run_model              # ML-based anomaly detection
+      - correlate_sensors      # Find related sensor patterns
+  
+  default_params:
+    # Detection thresholds
+    zscore_threshold: 3.0          # Standard deviations for anomaly
+    iqr_multiplier: 1.5            # IQR multiplier for outlier detection
+    min_data_points: 30            # Minimum history for baseline
+    
+    # Baseline configuration
+    baseline_window: 3600          # Seconds of data for rolling baseline
+    seasonal_period: 86400         # Daily seasonality (seconds)
+    
+    # Rate of change
+    max_rate_of_change: null       # Override per-sensor
+    rate_window: 60                # Seconds for rate calculation
+    
+    # Alerting
+    alert_cooldown: 300            # Seconds between repeated alerts
+    require_confirmation: false    # Wait for multiple anomalies before alerting
+    confirmation_window: 60        # Seconds to wait for confirmation
+  
+  instructions: |
+    ## Monitoring Pipeline
+    
+    1. **Data Ingestion**
+       - Receive sensor reading via trigger
+       - Validate data format and range
+       - Check for stale data (sensor health)
+    
+    2. **Baseline Retrieval**
+       - Fetch rolling baseline for sensor_id
+       - If insufficient history: use configured defaults
+       - Account for seasonal patterns if configured
+    
+    3. **Anomaly Detection** (multi-method)
+       
+       a. **Threshold Check**
+          - Compare against hard limits (sensor-specific config)
+          - Immediate alert for safety-critical thresholds
+       
+       b. **Statistical Analysis**
+          - Calculate z-score against baseline
+          - If |z-score| > zscore_threshold: flag anomaly
+          - Also check IQR-based outlier detection
+       
+       c. **Rate of Change**
+          - Calculate derivative over rate_window
+          - Flag if exceeds max_rate_of_change
+       
+       d. **ML Model** (if available)
+          - Run trained anomaly model
+          - Compare with statistical results
+          - ML can override statistical false positives
+    
+    4. **Correlation Analysis** (for confirmed anomalies)
+       - Check related sensors for correlated anomalies
+       - Build context for root cause analysis
+       - Reduces false positives from systemic events
+    
+    5. **Alert Decision**
+       - If require_confirmation: wait for confirmation_window
+       - Check alert_cooldown to avoid spam
+       - Determine severity based on deviation magnitude
+       - Route to notification_agent with context
+    
+    6. **Logging & Learning**
+       - Log all anomalies to time-series database
+       - Store context for learning_agent review
+       - Update baseline statistics
+  
+  resource_profile:
+    min_memory_mb: 64
+    typical_memory_mb: 128
+    requires_gpu: false
+    typical_latency_ms: 50        # Per data point
+    max_concurrent_sensors: 1000
+  
+  sensor_profiles:
+    # Default profiles for common sensor types
+    # Override with sensor-specific config
+    
+    temperature:
+      unit: celsius
+      normal_range: [-20, 50]
+      critical_range: [-40, 80]
+      max_rate_of_change: 5.0     # degrees per minute
+      seasonal: true
+      
+    vibration:
+      unit: g
+      normal_range: [0, 2.0]
+      critical_range: [0, 10.0]
+      max_rate_of_change: 1.0
+      frequency_analysis: true
+      
+    pressure:
+      unit: psi
+      normal_range: [0, 100]
+      critical_range: [0, 150]
+      max_rate_of_change: 10.0
+      
+    humidity:
+      unit: percent
+      normal_range: [20, 80]
+      critical_range: [0, 100]
+      seasonal: true
+      
+    power:
+      unit: watts
+      normal_range: [0, 5000]
+      max_rate_of_change: 1000
+      seasonal: true
+      time_of_day_patterns: true
+  
+  escalation:
+    # Escalate to human or higher-level system
+    conditions:
+      - type: severity
+        threshold: critical
+        action: immediate_notify
+      - type: uncertainty
+        model_disagreement: true
+        action: request_review
+      - type: correlation
+        affected_sensors: 5
+        action: escalate_to_orchestrator
+  
+  learning:
+    sample_storage: "local:learning_samples/anomaly"
+    collect_on:
+      - false_positive_marked     # User marks alert as false positive
+      - anomaly_confirmed         # Anomaly verified by user
+      - pattern_novel             # New anomaly pattern detected
+    metadata_fields:
+      - sensor_id
+      - sensor_type
+      - value
+      - baseline_mean
+      - baseline_std
+      - zscore
+      - timestamp
+      - outcome                   # Was this a true anomaly?
+  
+  outputs:
+    - name: anomaly_alert
+      description: "Anomaly detection result"
+      schema:
+        sensor_id: string
+        anomaly_type: string      # "threshold" | "statistical" | "rate" | "ml"
+        severity: string          # "info" | "warning" | "critical"
+        value: float
+        expected_range: {min: float, max: float}
+        zscore: float
+        confidence: float
+        correlated_sensors: array
+        recommended_action: string
+        
+    - name: health_report
+      description: "Periodic sensor health summary"
+      schema:
+        sensors_checked: integer
+        healthy: integer
+        degraded: integer
+        anomalous: integer
+        stale: integer
+        details: array
+  
+  dependencies:
+    agents:
+      - notification_agent
+      - learning_agent
+      - orchestrator_agent       # For multi-sensor escalations
+    capabilities:
+      - timeseries:query
+      - anomaly:statistical
+      - anomaly:ml              # Optional ML models

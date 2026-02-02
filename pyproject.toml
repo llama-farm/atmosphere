@@ -1,0 +1,62 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "atmosphere"
+version = "1.0.0"
+description = "Semantic mesh routing for AI capabilities"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+authors = [
+    {name = "Rownd AI", email = "hello@rownd.ai"}
+]
+keywords = ["ai", "mesh", "routing", "llm", "distributed"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: System :: Distributed Computing",
+]
+
+dependencies = [
+    "aiohttp>=3.9.0",
+    "cryptography>=41.0.0",
+    "fastapi>=0.109.0",
+    "uvicorn>=0.25.0",
+    "numpy>=1.24.0",
+    "click>=8.0.0",
+    "rich>=13.0.0",
+    "zeroconf>=0.131.0",
+    "pydantic>=2.0.0",
+    "psutil>=5.9.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.23.0",
+    "httpx>=0.26.0",
+]
+
+[project.scripts]
+atmosphere = "atmosphere.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/rowndai/atmosphere"
+Documentation = "https://github.com/rowndai/atmosphere#readme"
+Repository = "https://github.com/rowndai/atmosphere"
+
+[tool.setuptools.packages.find]
+include = ["atmosphere*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
