@@ -1,304 +1,315 @@
 """
-Mesh Tokens: Self-contained, offline-verifiable membership certificates.
+Mesh authentication tokens.
 
-These tokens prove a device is a member of a mesh without requiring
-network access to verify.
+Tokens provide cryptographically signed authorization to join a mesh.
+Only mesh founders can issue valid tokens.
 """
 
 import base64
+import hashlib
 import json
+import secrets
+import struct
 import time
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Optional, List
 
-from .identity import verify_signature_b64
-
-# Production-hardening constants
-CLOCK_SKEW_TOLERANCE = 300  # 5 minutes tolerance
-EXPIRATION_GRACE_PERIOD = 60  # 1 minute grace
+from .identity import KeyPair
 
 
 @dataclass
 class MeshToken:
     """
-    A mesh membership token (certificate).
+    A signed token authorizing a node to join a mesh.
     
-    Self-contained proof that a device is a member of a mesh.
-    Can be verified offline using only the mesh's public key.
+    Tokens are:
+    - Issued by mesh founders (who hold signing keys)
+    - Time-limited (default 24h, max 7 days)
+    - Bound to a specific node_id (optional, for invites)
+    - Scoped to capabilities (what the node can do)
     """
-    version: int
     mesh_id: str
-    mesh_name: str
-    
-    # Device info
-    device_id: str
-    device_public_key: str
-    device_name: str
-    hardware_hash: str
-    
-    # Authorization
-    capabilities: List[str]
-    tier: str
-    
-    # Validity
+    node_id: Optional[str]  # None = open invite (any node)
     issued_at: int
     expires_at: int
+    capabilities: List[str]
+    issuer_id: str  # Node ID of the founder who issued
+    nonce: str  # Random to prevent replay
+    signature: str  # Ed25519 signature (base64)
     
-    # Issuer info
-    issuer_node_id: str
-    issuer_public_key: str
-    issuer_signature: str
-    
-    # Mesh signature
-    mesh_public_key: str
-    
-    @property
-    def is_expired(self) -> bool:
-        """Check if token has expired (includes grace period)."""
-        now = time.time()
-        effective_expiration = self.expires_at + EXPIRATION_GRACE_PERIOD + CLOCK_SKEW_TOLERANCE
-        return now > effective_expiration
-    
-    @property
-    def time_remaining(self) -> int:
-        """Seconds until expiration."""
+    @classmethod
+    def create(
+        cls,
+        mesh_id: str,
+        issuer_keypair: KeyPair,
+        issuer_id: str,
+        node_id: Optional[str] = None,
+        capabilities: Optional[List[str]] = None,
+        ttl_seconds: int = 86400,  # 24 hours
+    ) -> "MeshToken":
+        """
+        Create a new signed mesh token.
+        
+        Args:
+            mesh_id: The mesh this token grants access to
+            issuer_keypair: The founder's keypair for signing
+            issuer_id: The founder's node ID
+            node_id: Specific node this token is for (None = any)
+            capabilities: What the node can do (default: ["participant"])
+            ttl_seconds: How long until expiration (max 7 days)
+        """
         now = int(time.time())
-        effective_expiration = self.expires_at + EXPIRATION_GRACE_PERIOD + CLOCK_SKEW_TOLERANCE
-        return max(0, effective_expiration - now)
+        ttl_seconds = min(ttl_seconds, 7 * 86400)  # Max 7 days
+        
+        token = cls(
+            mesh_id=mesh_id,
+            node_id=node_id,
+            issued_at=now,
+            expires_at=now + ttl_seconds,
+            capabilities=capabilities or ["participant"],
+            issuer_id=issuer_id,
+            nonce=secrets.token_hex(16),
+            signature="",
+        )
+        
+        # Sign the token
+        token.signature = token._sign(issuer_keypair)
+        return token
+    
+    def _canonical_bytes(self) -> bytes:
+        """Get canonical bytes for signing/verification."""
+        # Deterministic JSON encoding
+        data = {
+            "mesh_id": self.mesh_id,
+            "node_id": self.node_id,
+            "issued_at": self.issued_at,
+            "expires_at": self.expires_at,
+            "capabilities": sorted(self.capabilities),
+            "issuer_id": self.issuer_id,
+            "nonce": self.nonce,
+        }
+        return json.dumps(data, sort_keys=True, separators=(',', ':')).encode()
+    
+    def _sign(self, keypair: KeyPair) -> str:
+        """Sign with the issuer's keypair."""
+        return keypair.sign_b64(self._canonical_bytes())
+    
+    def verify(self, issuer_public_key: bytes) -> bool:
+        """
+        Verify the token signature.
+        
+        Args:
+            issuer_public_key: The public key of the issuer
+        
+        Returns:
+            True if signature is valid
+        """
+        try:
+            from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+            
+            pubkey = Ed25519PublicKey.from_public_bytes(issuer_public_key)
+            sig_bytes = base64.b64decode(self.signature)
+            pubkey.verify(sig_bytes, self._canonical_bytes())
+            return True
+        except Exception:
+            return False
+    
+    def is_expired(self) -> bool:
+        """Check if token has expired."""
+        return time.time() > self.expires_at
+    
+    def is_valid_for_node(self, node_id: str) -> bool:
+        """Check if this token is valid for a specific node."""
+        if self.is_expired():
+            return False
+        if self.node_id is not None and self.node_id != node_id:
+            return False
+        return True
     
     def to_dict(self) -> dict:
-        """Serialize token to dict."""
+        """Convert to dictionary for JSON serialization."""
         return {
-            "version": self.version,
             "mesh_id": self.mesh_id,
-            "mesh_name": self.mesh_name,
-            "device": {
-                "device_id": self.device_id,
-                "public_key": self.device_public_key,
-                "name": self.device_name,
-                "hardware_hash": self.hardware_hash
-            },
-            "authorization": {
-                "capabilities": self.capabilities,
-                "tier": self.tier
-            },
-            "validity": {
-                "issued_at": self.issued_at,
-                "expires_at": self.expires_at
-            },
-            "issuer": {
-                "node_id": self.issuer_node_id,
-                "public_key": self.issuer_public_key,
-                "signature": self.issuer_signature
-            },
-            "mesh_public_key": self.mesh_public_key
+            "node_id": self.node_id,
+            "issued_at": self.issued_at,
+            "expires_at": self.expires_at,
+            "capabilities": self.capabilities,
+            "issuer_id": self.issuer_id,
+            "nonce": self.nonce,
+            "signature": self.signature,
         }
-    
-    def to_json(self) -> str:
-        """Serialize to JSON string."""
-        return json.dumps(self.to_dict(), indent=2)
-    
-    def to_compact(self) -> str:
-        """Serialize to compact base64 string for transmission."""
-        data = json.dumps(self.to_dict(), separators=(',', ':'))
-        return base64.urlsafe_b64encode(data.encode()).decode()
     
     @classmethod
     def from_dict(cls, data: dict) -> "MeshToken":
-        """Load token from dict."""
+        """Create from dictionary."""
         return cls(
-            version=data["version"],
             mesh_id=data["mesh_id"],
-            mesh_name=data["mesh_name"],
-            device_id=data["device"]["device_id"],
-            device_public_key=data["device"]["public_key"],
-            device_name=data["device"]["name"],
-            hardware_hash=data["device"]["hardware_hash"],
-            capabilities=data["authorization"]["capabilities"],
-            tier=data["authorization"]["tier"],
-            issued_at=data["validity"]["issued_at"],
-            expires_at=data["validity"]["expires_at"],
-            issuer_node_id=data["issuer"]["node_id"],
-            issuer_public_key=data["issuer"]["public_key"],
-            issuer_signature=data["issuer"]["signature"],
-            mesh_public_key=data["mesh_public_key"]
+            node_id=data.get("node_id"),
+            issued_at=data["issued_at"],
+            expires_at=data["expires_at"],
+            capabilities=data.get("capabilities", ["participant"]),
+            issuer_id=data["issuer_id"],
+            nonce=data["nonce"],
+            signature=data["signature"],
         )
     
+    def encode(self) -> str:
+        """Encode token to compact string for QR codes."""
+        # Use base64url for URL-safe encoding
+        json_bytes = json.dumps(self.to_dict(), separators=(',', ':')).encode()
+        return base64.urlsafe_b64encode(json_bytes).decode().rstrip('=')
+    
     @classmethod
-    def from_compact(cls, compact: str) -> "MeshToken":
-        """Load token from compact base64 string."""
-        data = json.loads(base64.urlsafe_b64decode(compact))
+    def decode(cls, encoded: str) -> "MeshToken":
+        """Decode token from compact string."""
+        # Add padding if needed
+        padding = 4 - (len(encoded) % 4)
+        if padding != 4:
+            encoded += '=' * padding
+        
+        json_bytes = base64.urlsafe_b64decode(encoded)
+        data = json.loads(json_bytes)
+        return cls.from_dict(data)
+
+
+@dataclass
+class MeshInvite:
+    """
+    A shareable invite containing connection info + token.
+    
+    Used for QR codes and deep links.
+    """
+    token: MeshToken
+    mesh_name: str
+    endpoints: List[str]  # ["local:192.168.1.100:11450", "relay:wss://..."]
+    mesh_public_key: str  # For verification
+    
+    def to_dict(self) -> dict:
+        return {
+            "token": self.token.to_dict(),
+            "mesh_name": self.mesh_name,
+            "endpoints": self.endpoints,
+            "mesh_public_key": self.mesh_public_key,
+        }
+    
+    @classmethod
+    def from_dict(cls, data: dict) -> "MeshInvite":
+        return cls(
+            token=MeshToken.from_dict(data["token"]),
+            mesh_name=data["mesh_name"],
+            endpoints=data.get("endpoints", []),
+            mesh_public_key=data["mesh_public_key"],
+        )
+    
+    def encode(self) -> str:
+        """Encode for QR code / deep link."""
+        json_bytes = json.dumps(self.to_dict(), separators=(',', ':')).encode()
+        return base64.urlsafe_b64encode(json_bytes).decode().rstrip('=')
+    
+    @classmethod
+    def decode(cls, encoded: str) -> "MeshInvite":
+        """Decode from QR code / deep link."""
+        padding = 4 - (len(encoded) % 4)
+        if padding != 4:
+            encoded += '=' * padding
+        
+        json_bytes = base64.urlsafe_b64decode(encoded)
+        data = json.loads(json_bytes)
         return cls.from_dict(data)
     
+    def to_deep_link(self) -> str:
+        """Generate atmosphere:// deep link."""
+        return f"atmosphere://join?invite={self.encode()}"
+    
     @classmethod
-    def from_json(cls, json_str: str) -> "MeshToken":
-        """Load token from JSON string."""
-        return cls.from_dict(json.loads(json_str))
+    def from_deep_link(cls, url: str) -> "MeshInvite":
+        """Parse atmosphere:// deep link."""
+        import urllib.parse
+        parsed = urllib.parse.urlparse(url)
+        params = urllib.parse.parse_qs(parsed.query)
+        invite_str = params.get("invite", [""])[0]
+        return cls.decode(invite_str)
 
 
-class TokenIssuer:
-    """Issues mesh tokens to approved devices."""
+class TokenStore:
+    """
+    Stores issued and received tokens.
     
-    def __init__(self, mesh_identity, node_identity):
+    Used by relay server to cache mesh public keys.
+    """
+    
+    def __init__(self):
+        self._mesh_keys: dict[str, bytes] = {}  # mesh_id -> public key
+        self._used_nonces: set[str] = set()  # Prevent replay
+        self._nonce_expiry: dict[str, int] = {}  # nonce -> expires_at
+    
+    def register_mesh(self, mesh_id: str, public_key: bytes, founder_proof: str) -> bool:
         """
-        Create a token issuer.
+        Register a mesh's public key.
         
-        Args:
-            mesh_identity: The MeshIdentity for this mesh
-            node_identity: This node's NodeIdentity (must be a founder)
+        Only the first founder to connect can register.
         """
-        self.mesh = mesh_identity
-        self.node = node_identity
+        if mesh_id in self._mesh_keys:
+            return False  # Already registered
+        
+        # Verify founder proof (signature of mesh_id by the mesh key)
+        try:
+            from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+            
+            pubkey = Ed25519PublicKey.from_public_bytes(public_key)
+            sig_bytes = base64.b64decode(founder_proof)
+            pubkey.verify(sig_bytes, mesh_id.encode())
+            
+            self._mesh_keys[mesh_id] = public_key
+            return True
+        except Exception:
+            return False
     
-    def issue_token(
-        self,
-        device_id: str,
-        device_public_key: str,
-        device_name: str,
-        hardware_hash: str,
-        capabilities: List[str],
-        tier: str = "compute",
-        validity_hours: int = 24
-    ) -> MeshToken:
+    def get_mesh_key(self, mesh_id: str) -> Optional[bytes]:
+        """Get the public key for a mesh."""
+        return self._mesh_keys.get(mesh_id)
+    
+    def verify_token(self, token: MeshToken, node_id: str) -> tuple[bool, str]:
         """
-        Issue a membership token to a device.
+        Verify a token for joining a mesh.
         
         Returns:
-            MeshToken that the device can use to prove membership
+            (success, error_message)
         """
-        now = int(time.time())
-        expires = now + (validity_hours * 3600)
-        
-        # Build token data (without signature)
-        token_data = {
-            "version": 1,
-            "mesh_id": self.mesh.mesh_id,
-            "mesh_name": self.mesh.name,
-            "device": {
-                "device_id": device_id,
-                "public_key": device_public_key,
-                "name": device_name,
-                "hardware_hash": hardware_hash
-            },
-            "authorization": {
-                "capabilities": capabilities,
-                "tier": tier
-            },
-            "validity": {
-                "issued_at": now,
-                "expires_at": expires
-            },
-            "issuer": {
-                "node_id": self.node.node_id,
-                "public_key": self.node.public_key
-            },
-            "mesh_public_key": self.mesh.master_public_key
-        }
-        
-        # Sign the token
-        message = json.dumps(token_data, sort_keys=True).encode()
-        signature = self.node.sign(message)
-        
-        return MeshToken(
-            version=1,
-            mesh_id=self.mesh.mesh_id,
-            mesh_name=self.mesh.name,
-            device_id=device_id,
-            device_public_key=device_public_key,
-            device_name=device_name,
-            hardware_hash=hardware_hash,
-            capabilities=capabilities,
-            tier=tier,
-            issued_at=now,
-            expires_at=expires,
-            issuer_node_id=self.node.node_id,
-            issuer_public_key=self.node.public_key,
-            issuer_signature=signature,
-            mesh_public_key=self.mesh.master_public_key
-        )
-
-
-class TokenVerifier:
-    """Verifies mesh tokens offline."""
-    
-    def __init__(self, mesh_public_key: str, founding_members: List[dict]):
-        """
-        Create a token verifier.
-        
-        Args:
-            mesh_public_key: The mesh's master public key
-            founding_members: List of founding member info
-        """
-        self.mesh_public_key = mesh_public_key
-        self.founding_members = {
-            f["node_id"]: f for f in founding_members
-        }
-    
-    def verify(self, token: MeshToken) -> tuple:
-        """
-        Verify a mesh token.
-        
-        Returns:
-            (is_valid, reason) tuple
-        """
-        # Check version
-        if token.version != 1:
-            return False, f"Unknown token version: {token.version}"
-        
         # Check expiration
-        if token.is_expired:
-            return False, "Token has expired"
+        if token.is_expired():
+            return False, "Token expired"
         
-        # Check mesh public key matches
-        if token.mesh_public_key != self.mesh_public_key:
-            return False, "Token is for a different mesh"
+        # Check node binding
+        if token.node_id and token.node_id != node_id:
+            return False, "Token bound to different node"
         
-        # Check issuer is a known founding member
-        if token.issuer_node_id not in self.founding_members:
-            return False, f"Unknown issuer: {token.issuer_node_id}"
+        # Check replay (nonce already used)
+        if token.nonce in self._used_nonces:
+            return False, "Token already used (replay)"
         
-        founder = self.founding_members[token.issuer_node_id]
-        if founder["public_key"] != token.issuer_public_key:
-            return False, "Issuer public key mismatch"
+        # Get mesh public key
+        mesh_key = self.get_mesh_key(token.mesh_id)
+        if not mesh_key:
+            return False, "Mesh not registered"
         
-        # Verify issuer signature
-        token_data = {
-            "version": token.version,
-            "mesh_id": token.mesh_id,
-            "mesh_name": token.mesh_name,
-            "device": {
-                "device_id": token.device_id,
-                "public_key": token.device_public_key,
-                "name": token.device_name,
-                "hardware_hash": token.hardware_hash
-            },
-            "authorization": {
-                "capabilities": token.capabilities,
-                "tier": token.tier
-            },
-            "validity": {
-                "issued_at": token.issued_at,
-                "expires_at": token.expires_at
-            },
-            "issuer": {
-                "node_id": token.issuer_node_id,
-                "public_key": token.issuer_public_key
-            },
-            "mesh_public_key": token.mesh_public_key
-        }
+        # Verify signature
+        if not token.verify(mesh_key):
+            return False, "Invalid signature"
         
-        message = json.dumps(token_data, sort_keys=True).encode()
+        # Mark nonce as used
+        self._used_nonces.add(token.nonce)
+        self._nonce_expiry[token.nonce] = token.expires_at
         
-        if not verify_signature_b64(
-            token.issuer_public_key,
-            message,
-            token.issuer_signature
-        ):
-            return False, "Invalid issuer signature"
-        
-        return True, "Token is valid"
+        return True, ""
     
-    def quick_verify(self, token: MeshToken) -> bool:
-        """Quick verification (returns bool only)."""
-        is_valid, _ = self.verify(token)
-        return is_valid
+    def cleanup_expired_nonces(self):
+        """Remove expired nonces to prevent memory growth."""
+        now = time.time()
+        expired = [
+            nonce for nonce, exp in self._nonce_expiry.items()
+            if exp < now
+        ]
+        for nonce in expired:
+            self._used_nonces.discard(nonce)
+            del self._nonce_expiry[nonce]

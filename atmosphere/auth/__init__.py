@@ -13,16 +13,25 @@ from .identity import (
     generate_node_identity,
     load_node_identity,
     verify_signature,
+    get_hardware_fingerprint,
 )
 from .tokens import (
     MeshToken,
-    TokenIssuer,
-    TokenVerifier,
+    MeshInvite,
+    TokenStore,
 )
-from .federation import (
-    FederationLink,
-    FederatedMesh,
-)
+
+# Federation is optional - may not exist yet
+try:
+    from .federation import (
+        FederationLink,
+        FederatedMesh,
+    )
+    _has_federation = True
+except ImportError:
+    FederationLink = None
+    FederatedMesh = None
+    _has_federation = False
 
 __all__ = [
     # Identity
@@ -31,11 +40,12 @@ __all__ = [
     "generate_node_identity",
     "load_node_identity",
     "verify_signature",
+    "get_hardware_fingerprint",
     # Tokens
     "MeshToken",
-    "TokenIssuer",
-    "TokenVerifier",
-    # Federation
-    "FederationLink",
-    "FederatedMesh",
+    "MeshInvite",
+    "TokenStore",
 ]
+
+if _has_federation:
+    __all__.extend(["FederationLink", "FederatedMesh"])

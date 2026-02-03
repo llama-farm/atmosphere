@@ -1,0 +1,9 @@
+# Railway build config (Nixpacks alternative to Dockerfile)
+[phases.setup]
+nixPkgs = ["python312"]
+
+[phases.install]
+cmds = ["pip install -r requirements.txt"]
+
+[start]
+cmd = "python server.py"

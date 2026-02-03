@@ -1,0 +1,30 @@
+# Atmosphere Relay Server - Docker Compose
+# For local development and testing
+
+version: '3.8'
+
+services:
+  relay:
+    build: .
+    ports:
+      - "8765:8765"
+    restart: unless-stopped
+    environment:
+      - PORT=8765
+      - HOST=0.0.0.0
+      - LOG_LEVEL=info
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8765/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
+    # Resource limits for production
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+        reservations:
+          cpus: '0.1'
+          memory: 64M
