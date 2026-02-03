@@ -64,7 +64,48 @@ What happens:
 
 ## Core Principles
 
-### 1. Semantic Routing
+### 1. Bidirectional Capabilities
+
+Every capability is both a **trigger** and a **tool**.
+
+```
+┌────────────────────────────────────────────────────────────────────────┐
+│                     BIDIRECTIONAL CAPABILITY                           │
+├────────────────────────────────────────────────────────────────────────┤
+│                                                                        │
+│   PUSH (Trigger)                         PULL (Tool)                   │
+│                                                                        │
+│   Camera detects motion          ←→      Agent queries camera          │
+│   Model finishes training        ←→      Agent invokes inference       │
+│   Sensor hits threshold          ←→      Agent reads current value     │
+│                                                                        │
+│   Same capability. Same mesh. Both directions.                         │
+└────────────────────────────────────────────────────────────────────────┘
+```
+
+**Why this matters:**
+- A camera isn't just a passive sensor you query
+- A model isn't just an endpoint you call  
+- Everything is a peer that can both **initiate** and **respond**
+
+```yaml
+capability:
+  id: front-door-camera
+  type: sensor/camera
+  
+  tools:      # What agents can PULL
+    - get_frame: "Current camera snapshot"
+    - get_history: "Motion events from last N minutes"
+    
+  triggers:   # What it can PUSH
+    - motion_detected: "Intent routes to security agent"
+    - person_detected: "High-priority, routes to notifications"
+    - package_detected: "Routes to delivery tracking"
+```
+
+See [design/BIDIRECTIONAL_CAPABILITIES.md](design/BIDIRECTIONAL_CAPABILITIES.md) for the full specification.
+
+### 2. Semantic Routing
 
 Don't route to addresses. Route to meaning.
 
@@ -146,9 +187,15 @@ This isn't vaporware. Working today:
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                         WORK LAYER                                      │
 │                                                                         │
-│  "Summarize these docs"  →  [Decompose]  →  Work Units  →  [Route]     │
+│  ┌───────────────────────────────┐  ┌───────────────────────────────┐  │
+│  │         PUSH (Triggers)       │  │         PULL (Tools)          │  │
+│  │                               │  │                               │  │
+│  │  Camera → "motion detected"   │  │  Agent → camera.get_frame()   │  │
+│  │  Model → "training complete"  │  │  Agent → thermostat.set(72)   │  │
+│  │  Sensor → "threshold hit"     │  │  Agent → model.classify(img)  │  │
+│  └───────────────────────────────┘  └───────────────────────────────┘  │
 │                                                                         │
-│  Work units are the atomic pieces that get distributed across nodes    │
+│  Both directions use the same routing fabric below                     │
 └─────────────────────────────────────────────────────────────────────────┘
                                     │
                                     ▼

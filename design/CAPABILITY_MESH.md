@@ -20,6 +20,23 @@ Traditional AI systems require you to know:
 
 ## Core Concepts
 
+### 0. Bidirectional Capabilities
+
+**Every capability is both a trigger and a tool.** This is the foundational insight of the capability mesh.
+
+| Direction | Mechanism | Example |
+|-----------|-----------|---------|
+| **PUSH** | Triggers | Camera detects motion → publishes intent to mesh |
+| **PULL** | Tools | Agent calls `camera.get_history()` → gets data back |
+
+Same capability. Same registration. Same routing fabric. Both directions.
+
+See **[BIDIRECTIONAL_CAPABILITIES.md](BIDIRECTIONAL_CAPABILITIES.md)** for the complete specification including:
+- Capability schema with tools and triggers
+- Push and pull routing flows
+- Cross-capability workflow examples
+- Implementation patterns
+
 ### 1. Typed Intents
 
 Every request is a typed intent with structured metadata:

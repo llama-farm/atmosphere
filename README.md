@@ -1,481 +1,236 @@
 # Atmosphere
 
-> **The Internet of Intent** — Route intelligence to capability, not packets to addresses.
+**The Internet of Intent — Route Intelligence, Not Packets**
+
+> Traditional networks route packets to addresses.  
+> Atmosphere routes work to capability.
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 
-**Atmosphere** is a semantic mesh protocol that routes AI requests to the right capability on the right node. Instead of hardcoding which model handles which request, Atmosphere discovers capabilities across a distributed mesh and routes intelligently based on intent.
+---
 
-## 📄 White Paper
+## The Vision
 
-For the full technical deep-dive, see the **[Atmosphere Protocol White Paper](https://drive.google.com/file/d/1-LmkSI4cMZcQiCG6uUgJSerJi2FwUNli/view?usp=sharing)**.
+What if your devices stopped being isolated islands and became one intelligent mesh? Your Mac, your GPU server, your edge devices, your cameras—all seamlessly sharing capabilities. You don't ask "which model should I call?" You just express intent: *"analyze this image for defects"*—and the mesh routes to the best available capability.
+
+Atmosphere is the protocol that makes this real. No central server. Works offline. Scales from 3 devices to 3 billion. Secure by default with cryptographic identity.
 
 ---
 
-## 🎯 What Problem Does This Solve?
-
-**Traditional AI APIs:**
-```
-Client → knows exact endpoint → calls specific model
-```
-
-**Atmosphere:**
-```
-Client → expresses intent → mesh routes to best capability
-```
-
-### Example
+## Quick Start
 
 ```bash
-# Traditional: You must know exactly which model to call
-curl https://api.openai.com/v1/chat/completions \
-  -d '{"model": "gpt-4", "messages": [...]}'
+# 1. Install
+pip install atmosphere
 
-# Atmosphere: Express intent, mesh finds the right capability
-curl http://localhost:8000/v1/chat/completions \
-  -d '{"model": "auto", "messages": [{"role": "user", "content": "What do llamas eat?"}]}'
+# 2. Start a node
+atmosphere node start
 
-# Atmosphere routes to the "llama-expert" project with RAG database
-# because it semantically matches the query
-```
-
----
-
-## ✨ Key Features
-
-- **🔍 Semantic Routing** — Routes based on intent, not hardcoded paths
-- **🌐 Mesh Networking** — Discover capabilities across distributed nodes
-- **🔌 OpenAI Compatible** — Drop-in replacement for OpenAI API
-- **⚡ Fast Routing** — Pre-computed embeddings, sub-millisecond decisions
-- **📦 Model Deployment** — Automatically distribute models across the mesh
-- **🔄 Gossip Protocol** — Sync routing tables without central authority
-- **👁️ Multi-Modal** — Route text, images, audio, and tool calls
-- **🤖 Agent Framework** — Discover and invoke agents across the mesh
-- **🔧 Tool Execution** — Execute tools on remote nodes (cameras, IoT, APIs)
-
----
-
-## 🦌 The Vision: Capability Mesh
-
-Atmosphere isn't just for text — it routes **any intent** to **any capability**:
-
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                      CAPABILITY MESH                                 │
-│                                                                      │
-│   "What is this?"     "Research llamas"    "Take a photo"          │
-│         │                    │                   │                  │
-│         ▼                    ▼                   ▼                  │
-│   ┌──────────┐        ┌──────────┐        ┌──────────┐             │
-│   │  Vision  │        │  Agent   │        │   Tool   │             │
-│   │ Classify │        │ Research │        │  Camera  │             │
-│   └──────────┘        └──────────┘        └──────────┘             │
-│         │                    │                   │                  │
-│         ▼                    ▼                   ▼                  │
-│      rob-mac              rob-mac           edge-gateway            │
-│   (has YOLO model)    (has research agent)  (has camera)           │
-└─────────────────────────────────────────────────────────────────────┘
-```
-
-### Example: The Deer Scenario
-
-A tiny edge sensor sees movement but can't identify the animal:
-
-```
-Edge Sensor → "I see an animal" (low confidence)
-      ↓
-Mesh Routes → rob-mac (has wildlife classifier)
-      ↓
-Classification → "White-tailed deer" (94% confidence)
-      ↓
-Learning Loop → Train edge model → Deploy back
-      ↓
-Next time → Sensor handles locally
-```
-
-See [design/CAPABILITY_MESH.md](design/CAPABILITY_MESH.md) for the full architecture.
-
----
-
-## 🚀 Quick Start
-
-### Prerequisites
-
-- Python 3.10+
-- [LlamaFarm](https://github.com/llama-farm/llamafarm) (for local model execution)
-
-### Installation
-
-```bash
-# Clone the repository
-git clone https://github.com/llama-farm/atmosphere.git
-cd atmosphere
-
-# Create virtual environment
-python -m venv .venv
-source .venv/bin/activate
-
-# Install dependencies
-pip install -e .
-
-# Start Atmosphere
-uvicorn atmosphere.api.server:create_app --factory --port 8000
-```
-
-### Quick Test
-
-```bash
-# List available models (discovered from LlamaFarm)
-curl http://localhost:8000/v1/models
-
-# Chat with semantic routing
+# 3. Route your first intent
 curl -X POST http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{
-    "model": "auto",
-    "messages": [{"role": "user", "content": "Hello!"}]
-  }'
+  -d '{"messages": [{"role": "user", "content": "Summarize this document"}]}'
+```
+
+The mesh automatically discovers local capabilities (LlamaFarm, Ollama) and routes your request.
+
+---
+
+## Core Concept: Bidirectional Capabilities
+
+**Every capability is both a TRIGGER and a TOOL.**
+
+This is the key insight. A camera doesn't just *provide* frames—it *pushes* events when something happens:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    BIDIRECTIONAL CAPABILITY                              │
+│                                                                          │
+│                         ┌──────────────┐                                 │
+│                         │   CAMERA     │                                 │
+│                         │  capability  │                                 │
+│                         └──────┬───────┘                                 │
+│                                │                                         │
+│            ┌───────────────────┴───────────────────┐                     │
+│            │                                       │                     │
+│            ▼                                       ▼                     │
+│    ┌───────────────┐                      ┌───────────────┐              │
+│    │   TRIGGERS    │                      │    TOOLS      │              │
+│    │   (push)      │                      │    (pull)     │              │
+│    ├───────────────┤                      ├───────────────┤              │
+│    │ • motion      │                      │ • get_frame() │              │
+│    │ • person      │                      │ • get_clip()  │              │
+│    │ • package     │                      │ • get_history │              │
+│    │ • vehicle     │                      │ • list_events │              │
+│    └───────┬───────┘                      └───────┬───────┘              │
+│            │                                       │                     │
+│            │ "person detected"                     │ agent.call()        │
+│            ▼                                       ▼                     │
+│    ┌───────────────┐                      ┌───────────────┐              │
+│    │   SECURITY    │                      │   SECURITY    │              │
+│    │    AGENT      │───────────────────▶  │    AGENT      │              │
+│    │  (reactive)   │   same agent can     │  (proactive)  │              │
+│    └───────────────┘   both receive and   └───────────────┘              │
+│                        invoke                                            │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**Example workflow:**
+1. Camera **TRIGGERS** "person detected" → routes to security agent
+2. Agent **CALLS** `camera.get_history()` → reviews motion events  
+3. Agent **CALLS** `phone.notify()` → sends alert
+4. Agent **TRIGGERS** "alert sent" → logged for audit
+
+---
+
+## Capability Types
+
+| Category | Type | Triggers | Tools |
+|----------|------|----------|-------|
+| **Vision** | `sensor/camera` | motion, person, package, vehicle | get_frame, get_clip, get_history |
+| **Voice** | `audio/generate` | speech_complete | speak, list_voices |
+| **Transcription** | `audio/transcribe` | transcription_complete, keyword | transcribe, transcribe_stream |
+| **Image Gen** | `vision/generate` | generation_complete | generate, edit, variations |
+| **LLM** | `llm/chat` | — | chat, complete, embed |
+| **IoT** | `iot/*` | threshold, anomaly, state_change | get_value, set_value, list_devices |
+| **Agent** | `agent/*` | task_complete, decision_made | invoke, query_state |
+
+---
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         ATMOSPHERE PROTOCOL STACK                        │
+├─────────────────────────────────────────────────────────────────────────┤
+│  WORK LAYER          Your apps, LlamaFarm, agents, tools                 │
+│                      Intent expression, capability consumption           │
+├─────────────────────────────────────────────────────────────────────────┤
+│  ROUTING LAYER       Semantic routing, gradient tables                   │
+│                      Pre-computed embeddings (<1ms routing)              │
+│                      Capability matching, load balancing                 │
+├─────────────────────────────────────────────────────────────────────────┤
+│  MESH LAYER          Gossip protocol, peer discovery                     │
+│                      Session tracking, capability announcements          │
+│                      O(log N) propagation, no central authority          │
+├─────────────────────────────────────────────────────────────────────────┤
+│  IDENTITY LAYER      Rownd Local (Ed25519 keypairs)                      │
+│                      Offline token verification                          │
+│                      Federation, delegation, revocation                  │
+├─────────────────────────────────────────────────────────────────────────┤
+│  TRANSPORT LAYER     TCP/UDP, WebSocket, QUIC                            │
+│                      STUN/NAT traversal, mDNS discovery                  │
+│                      LoRa, BLE, WiFi (future)                            │
+└─────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## 🏗️ Architecture
+## Integrations
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                         ATMOSPHERE                               │
-│                                                                  │
-│  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐       │
-│  │   OpenAI     │    │   Semantic   │    │    Mesh      │       │
-│  │   API Layer  │───▶│    Router    │───▶│   Network    │       │
-│  └──────────────┘    └──────────────┘    └──────────────┘       │
-│         │                   │                   │                │
-│         ▼                   ▼                   ▼                │
-│  ┌──────────────────────────────────────────────────────┐       │
-│  │                    DISCOVERY                          │       │
-│  │  • API-based project discovery                        │       │
-│  │  • Pre-computed embeddings for fast matching          │       │
-│  │  • Domain/topic/capability indexing                   │       │
-│  └──────────────────────────────────────────────────────┘       │
-│                              │                                   │
-└──────────────────────────────│───────────────────────────────────┘
-                               │
-        ┌──────────────────────┼──────────────────────┐
-        ▼                      ▼                      ▼
-┌──────────────┐      ┌──────────────┐      ┌──────────────┐
-│  LlamaFarm   │      │   Ollama     │      │   OpenAI     │
-│  (Universal  │      │              │      │   (Cloud)    │
-│   Runtime)   │      │              │      │              │
-└──────────────┘      └──────────────┘      └──────────────┘
-```
+### LlamaFarm
 
----
-
-## 🔧 How It Works
-
-### 1. Discovery
-
-Atmosphere discovers AI capabilities by querying provider APIs:
+Atmosphere auto-discovers LlamaFarm projects and registers them as capabilities:
 
 ```python
-# Discovers projects from LlamaFarm API
-discovery = APIDiscovery("http://localhost:14345")
-projects = await discovery.discover()
-
-# Returns structured metadata:
-# {
-#   "namespace": "default",
-#   "name": "llama-expert-14",
-#   "domain": "camelids",
-#   "capabilities": ["chat", "rag"],
-#   "topics": ["llamas", "alpacas", "fiber"]
-# }
-```
-
-### 2. Routing
-
-The semantic router uses pre-computed embeddings for fast matching:
-
-```python
-# Route by explicit path
-result = router.route("default/llama-expert-14")
-
-# Route by content (semantic)
-result = router.route_by_content([
-    {"role": "user", "content": "How do I care for my llama?"}
-])
-# → Routes to llama-expert project (domain: camelids)
-```
-
-### 3. Execution
-
-Requests are proxied to the appropriate backend:
-
-```python
-# Atmosphere → LlamaFarm → Universal Runtime
-POST /v1/projects/default/llama-expert-14/chat/completions
-```
-
----
-
-## 🔌 Extending to Other Providers
-
-Atmosphere is designed to be provider-agnostic. Add new providers by implementing the adapter interface:
-
-### Creating a Custom Adapter
-
-```python
-# atmosphere/adapters/my_provider.py
-
-from atmosphere.adapters.base import BaseAdapter
-
-class MyProviderAdapter(BaseAdapter):
-    """Adapter for MyProvider API."""
-    
-    def __init__(self, base_url: str, api_key: str = None):
-        self.base_url = base_url
-        self.api_key = api_key
-    
-    async def discover(self) -> list[Project]:
-        """Discover available models/capabilities."""
-        # Query your provider's API
-        response = await self.client.get(f"{self.base_url}/models")
-        
-        projects = []
-        for model in response.json()["models"]:
-            projects.append(Project(
-                namespace="myprovider",
-                name=model["id"],
-                domain=self._detect_domain(model),
-                capabilities=["chat"],
-            ))
-        return projects
-    
-    async def chat(self, project: Project, messages: list) -> dict:
-        """Execute a chat completion."""
-        response = await self.client.post(
-            f"{self.base_url}/chat",
-            json={"model": project.name, "messages": messages}
-        )
-        return response.json()
-```
-
-### Registering the Adapter
-
-```python
-# atmosphere/config.py
-
-ADAPTERS = {
-    "llamafarm": LlamaFarmAdapter,
-    "ollama": OllamaAdapter,
-    "openai": OpenAIAdapter,
-    "myprovider": MyProviderAdapter,  # Add your adapter
-}
-```
-
-### Built-in Adapters
-
-| Adapter | Description | Status |
-|---------|-------------|--------|
-| `LlamaFarmAdapter` | LlamaFarm Universal Runtime | ✅ Complete |
-| `OllamaAdapter` | Ollama local models | ✅ Complete |
-| `OpenAIAdapter` | OpenAI API (cloud) | 🔄 Planned |
-| `AnthropicAdapter` | Anthropic Claude | 🔄 Planned |
-| `vLLMAdapter` | vLLM inference server | 🔄 Planned |
-
----
-
-## 🌐 Mesh Networking
-
-Atmosphere nodes discover each other and share routing information via gossip protocol.
-
-### Starting a Mesh
-
-```bash
-# Node 1 (Rob's Mac)
-atmosphere start --port 11451 --gossip-port 11450
-
-# Node 2 (Matt's Dell) - joins the mesh
-atmosphere start --port 11451 --gossip-port 11450 \
-  --seed-peer "rob-mac.local:11450"
-```
-
-### Gossip Messages
-
-```python
-# When a new project is discovered
-ROUTE_UPDATE = {
-    "type": "route_update",
-    "action": "add",
-    "project": "default/llama-expert-14",
+# LlamaFarm project with semantic metadata
+{
+    "namespace": "default",
+    "name": "llama-expert-14",
     "domain": "camelids",
     "capabilities": ["chat", "rag"],
-    "nodes": ["rob-mac"]
+    "topics": ["llamas", "alpacas", "fiber"]
 }
 
-# When a model is deployed
-MODEL_DEPLOYED = {
-    "type": "model_deployed",
-    "model": "network-anomaly-v3",
-    "node": "matt-dell",
-    "version": "1.0.0"
-}
+# Atmosphere routes semantically
+curl -X POST http://localhost:8000/v1/chat/completions \
+  -d '{"model": "auto", "messages": [{"role": "user", "content": "How do I care for my llama?"}]}'
+# → Automatically routes to llama-expert project
 ```
 
----
+### Ollama
 
-## 📦 Model Deployment
-
-Automatically distribute trained models across the mesh:
+Local models via Ollama are auto-discovered and added to the capability mesh:
 
 ```bash
-# List local models
-atmosphere model list
-
-# Push model to specific node
-atmosphere model push network-detector matt-dell
-
-# Deploy to all capable nodes
-atmosphere model deploy network-detector --all
+# Ollama models become routable
+atmosphere status
+# → ollama:llama3.2 (llm/chat)
+# → ollama:nomic-embed (llm/embed)
 ```
 
-### Model Manifest
+### OpenAI-Compatible API
 
-```yaml
-name: network-anomaly-detector
-version: 1.0.0
-type: anomaly_detector
-format: sklearn
-size_bytes: 12345678
+Drop-in replacement for OpenAI API—mesh handles routing:
 
-capabilities:
-  - anomaly_detection
-  - network_monitoring
+```python
+from openai import OpenAI
 
-node_requirements:
-  min_memory_mb: 512
-  gpu_required: false
+# Point to Atmosphere instead of OpenAI
+client = OpenAI(base_url="http://localhost:8000/v1", api_key="n/a")
+
+# Same API, intelligent routing
+response = client.chat.completions.create(
+    model="auto",  # Let mesh decide
+    messages=[{"role": "user", "content": "What is this?"}]
+)
 ```
 
 ---
 
-## 🎯 Typed Intents (Coming Soon)
+## Key Features
 
-Beyond OpenAI-compatible chat, Atmosphere supports typed intents for any capability:
+| Feature | Description |
+|---------|-------------|
+| **🔍 Semantic Routing** | Routes by intent meaning, not hardcoded paths |
+| **⚡ Sub-millisecond** | Pre-computed embeddings, O(1) gradient table lookup |
+| **🌐 Zero Config Mesh** | mDNS discovery, gossip sync, no central server |
+| **🔐 Zero Trust Auth** | Ed25519 identity, offline token verification |
+| **📦 Model Deployment** | Push models to nodes, organic learning loops |
+| **👁️ Multimodal** | Vision, voice, image gen—all bidirectional |
+| **🤖 Agent Framework** | Stateful agents with delegation |
+
+---
+
+## Model Deployment Strategies
+
+| Strategy | Description | Use Case |
+|----------|-------------|----------|
+| **Push** | Admin deploys model to specific nodes | Production rollout |
+| **Pull** | Node requests model it needs | On-demand capability |
+| **Gossip** | Model spreads organically through mesh | Popular models |
+| **Organic** | Edge learns → pushes improved model | ML learning loops |
+
+---
+
+## Links
+
+- **[Architecture Deep Dive](ARCHITECTURE.md)** — Full protocol specification
+- **[Bidirectional Capabilities](design/BIDIRECTIONAL_CAPABILITIES.md)** — Trigger/tool duality
+- **[Protocol Specification](design/GOSSIP_MESSAGES.md)** — Gossip message types
+- **[API Reference](design/API_REFERENCE.md)** — REST and WebSocket endpoints
+- **[Agent Layer](design/AGENT_LAYER.md)** — Stateful agent framework
+- **[Tool System](design/TOOL_SYSTEM.md)** — Remote tool execution
+- **[White Paper](https://drive.google.com/file/d/1-LmkSI4cMZcQiCG6uUgJSerJi2FwUNli/view?usp=sharing)** — Full technical deep-dive
+
+---
+
+## Contributing
 
 ```bash
-# Vision classification
-curl -X POST http://localhost:8000/v1/intent \
-  -d '{
-    "type": "vision/classify",
-    "domain": "wildlife",
-    "data": {"image": "<base64>"},
-    "preferences": {"latency": "low"}
-  }'
-
-# Agent invocation
-curl -X POST http://localhost:8000/v1/agent/invoke \
-  -d '{
-    "query": "Research the latest on llama breeding"
-  }'
-
-# Tool execution
-curl -X POST http://localhost:8000/v1/tool/execute \
-  -d '{
-    "tool": "camera-front@edge-gateway",
-    "action": "capture"
-  }'
-```
-
-### Supported Capability Types
-
-| Category | Types | Description |
-|----------|-------|-------------|
-| **LLM** | chat, reasoning, code, summarize | Text generation |
-| **Vision** | classify, detect, ocr, segment | Image processing |
-| **Audio** | transcribe, generate, identify | Audio processing |
-| **Agent** | research, workflow, monitor | Autonomous tasks |
-| **Tool** | camera, iot, api, file | Device/API control |
-| **ML** | anomaly, classify, forecast | ML inference |
-
----
-
-## 🛣️ Roadmap
-
-- [x] **Phase 1**: Single-node routing with LlamaFarm
-- [x] **Phase 2**: OpenAI-compatible API layer
-- [x] **Phase 3**: API-based discovery
-- [ ] **Phase 4**: Multi-node mesh networking
-- [ ] **Phase 5**: Model deployment & distribution
-- [ ] **Phase 6**: Edge learning loop (train → deploy → learn)
-- [ ] **Phase 7**: Typed intents (vision, audio, agents, tools)
-- [ ] **Phase 8**: Distributed embeddings (SimHash for edge devices)
-
----
-
-## 📁 Project Structure
-
-```
-atmosphere/
-├── api/                    # FastAPI server
-│   ├── server.py          # Main application
-│   └── routes.py          # API routes
-├── router/                 # Semantic routing
-│   ├── fast_router.py     # Embedding-based router
-│   ├── openai_compat.py   # OpenAI API compatibility
-│   └── project_router.py  # Project routing logic
-├── discovery/              # Capability discovery
-│   ├── api_discovery.py   # API-based discovery
-│   └── llamafarm.py       # LlamaFarm adapter
-├── deployment/             # Model deployment
-│   └── registry.py        # Model registry
-├── mesh/                   # Mesh networking
-│   ├── discovery.py       # mDNS/gossip discovery
-│   ├── gossip.py          # Gossip protocol
-│   └── network.py         # STUN/NAT traversal
-├── adapters/               # Provider adapters
-│   ├── llamafarm.py       # LlamaFarm adapter
-│   └── ollama.py          # Ollama adapter
-└── design/                 # Design documents
-    └── MODEL_DEPLOYMENT.md
-```
-
----
-
-## 🤝 Contributing
-
-Contributions are welcome! Please read our [Contributing Guide](CONTRIBUTING.md) for details.
-
-### Development Setup
-
-```bash
-# Clone and setup
 git clone https://github.com/llama-farm/atmosphere.git
 cd atmosphere
-python -m venv .venv
-source .venv/bin/activate
+python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
-
-# Run tests
 pytest tests/ -v
-
-# Run linting
-ruff check .
 ```
 
 ---
 
-## 📜 License
+## License
 
-Apache 2.0 - See [LICENSE](LICENSE) for details.
-
----
-
-## 🔗 Related Projects
-
-- [LlamaFarm](https://github.com/llama-farm/llamafarm) - Edge AI runtime
-- [Rownd-Local](https://github.com/llama-farm/rownd-local) - Decentralized identity for mesh auth
+Apache 2.0 — See [LICENSE](LICENSE)
 
 ---
 
