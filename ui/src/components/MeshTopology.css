@@ -83,6 +83,36 @@
   background: #3b82f6;
 }
 
+.legend-divider {
+  width: 1px;
+  height: 24px;
+  background: var(--border-color);
+}
+
+.legend-ring {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: transparent;
+  border: 3px solid;
+}
+
+.legend-ring.cost-low {
+  border-color: #10b981;
+}
+
+.legend-ring.cost-moderate {
+  border-color: #f59e0b;
+}
+
+.legend-ring.cost-high {
+  border-color: #ef4444;
+}
+
+.cost-ring {
+  transition: stroke 0.3s ease;
+}
+
 /* Tooltip styles */
 .mesh-tooltip {
   background: #1f2937;

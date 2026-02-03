@@ -5,6 +5,7 @@ Atmosphere CLI - Command line interface for mesh networking.
 import asyncio
 import json
 import logging
+import os
 import platform
 import sys
 from pathlib import Path
@@ -1014,6 +1015,144 @@ def tool_run(tool_name: str, params: str, param: tuple):
         console.print(f"  Error: {result.error}")
         console.print(f"  Code: {result.error_code}")
         sys.exit(1)
+
+
+# === Menu Bar App Commands ===
+
+@main.command()
+def menubar():
+    """Run Atmosphere as a native macOS menu bar app.
+    
+    Starts the API server and shows status in the menu bar.
+    This is the recommended way to run Atmosphere on macOS.
+    """
+    console.print("\n[bold blue]🌐 Starting Atmosphere Menu Bar App...[/bold blue]\n")
+    
+    try:
+        from .app.menubar import main as menubar_main
+        menubar_main()
+    except ImportError as e:
+        console.print("[red]Error: rumps not installed.[/red]")
+        console.print("\nInstall it with: [cyan]pip install rumps[/cyan]")
+        console.print(f"\nDetails: {e}")
+        sys.exit(1)
+
+
+@main.command()
+def install():
+    """Install Atmosphere to run automatically on login.
+    
+    Creates a LaunchAgent that starts the menu bar app when you log in.
+    The API server will always be available at localhost:11451.
+    """
+    import shutil
+    
+    config = get_config()
+    
+    if not config.identity_path.exists():
+        console.print("[yellow]Node not initialized. Running 'atmosphere init' first...[/yellow]\n")
+        # Initialize first
+        import subprocess
+        result = subprocess.run([sys.executable, "-m", "atmosphere.cli", "init"])
+        if result.returncode != 0:
+            console.print("[red]Initialization failed.[/red]")
+            sys.exit(1)
+    
+    # Find the plist file
+    plist_src = Path(__file__).parent / "install" / "com.llamafarm.atmosphere.plist"
+    plist_dst = Path.home() / "Library" / "LaunchAgents" / "com.llamafarm.atmosphere.plist"
+    
+    if not plist_src.exists():
+        console.print(f"[red]LaunchAgent template not found: {plist_src}[/red]")
+        sys.exit(1)
+    
+    # Ensure LaunchAgents directory exists
+    plist_dst.parent.mkdir(parents=True, exist_ok=True)
+    
+    # Check where atmosphere command is installed
+    import subprocess
+    result = subprocess.run(["which", "atmosphere"], capture_output=True, text=True)
+    atmosphere_path = result.stdout.strip() if result.returncode == 0 else "/opt/homebrew/bin/atmosphere"
+    
+    # Read and customize plist
+    plist_content = plist_src.read_text()
+    plist_content = plist_content.replace("/opt/homebrew/bin/atmosphere", atmosphere_path)
+    
+    # Write customized plist
+    plist_dst.write_text(plist_content)
+    
+    console.print(f"[dim]Installed LaunchAgent: {plist_dst}[/dim]")
+    
+    # Load the LaunchAgent
+    result = subprocess.run(["launchctl", "load", str(plist_dst)], capture_output=True, text=True)
+    
+    if result.returncode == 0:
+        console.print("\n[bold green]✓ Atmosphere installed successfully![/bold green]\n")
+        console.print("  Atmosphere will now start automatically when you log in.")
+        console.print("  Look for the mesh icon in your menu bar.\n")
+        console.print("[dim]Commands:[/dim]")
+        console.print("  atmosphere uninstall   Remove from login items")
+        console.print("  atmosphere status      Check server status")
+        console.print()
+    else:
+        if "already loaded" in result.stderr.lower() or "already loaded" in result.stdout.lower():
+            console.print("\n[yellow]Atmosphere is already installed.[/yellow]")
+            console.print("Run 'atmosphere uninstall' first to reinstall.\n")
+        else:
+            console.print(f"\n[red]Failed to load LaunchAgent:[/red] {result.stderr}")
+            sys.exit(1)
+
+
+@main.command()
+@click.option('--yes', '-y', is_flag=True, help='Skip confirmation')
+def uninstall(yes: bool):
+    """Remove Atmosphere from login items.
+    
+    Stops the running server and removes the LaunchAgent.
+    """
+    plist_path = Path.home() / "Library" / "LaunchAgents" / "com.llamafarm.atmosphere.plist"
+    
+    if not plist_path.exists():
+        console.print("[yellow]Atmosphere is not installed as a login item.[/yellow]")
+        return
+    
+    if not yes:
+        if not click.confirm("Remove Atmosphere from login items?"):
+            return
+    
+    import subprocess
+    
+    # Unload the LaunchAgent
+    result = subprocess.run(["launchctl", "unload", str(plist_path)], capture_output=True, text=True)
+    
+    # Remove the plist file
+    plist_path.unlink(missing_ok=True)
+    
+    console.print("\n[bold green]✓ Atmosphere removed from login items.[/bold green]")
+    console.print("  The menu bar app will no longer start on login.\n")
+    console.print("[dim]To run manually: atmosphere menubar[/dim]\n")
+
+
+@main.command()
+def daemon():
+    """Run Atmosphere as a headless background daemon.
+    
+    Like 'serve' but designed for production/server use.
+    No menu bar UI, just the API server.
+    """
+    config = get_config()
+    
+    if not config.identity_path.exists():
+        console.print("[red]Node not initialized. Run 'atmosphere init' first.[/red]")
+        sys.exit(1)
+    
+    console.print("\n[bold blue]🌐 Starting Atmosphere Daemon[/bold blue]")
+    console.print(f"   API: http://127.0.0.1:{config.server.port}")
+    console.print(f"   PID: {os.getpid()}")
+    console.print("   Press Ctrl+C to stop\n")
+    
+    from .api.server import run_server
+    run_server(host="127.0.0.1", port=config.server.port, reload=False)
 
 
 # Add model commands

@@ -1,0 +1,247 @@
+.cost-metrics {
+  background: var(--bg-secondary);
+  border-radius: 12px;
+  padding: 1.25rem;
+  border: 1px solid var(--border-color);
+}
+
+.cost-metrics.loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 200px;
+}
+
+.loading-spinner {
+  width: 32px;
+  height: 32px;
+  border: 3px solid var(--border-color);
+  border-top-color: var(--accent-primary);
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+}
+
+.metrics-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1rem;
+}
+
+.metrics-header h3 {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0;
+}
+
+.cost-badge {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.35rem 0.75rem;
+  border-radius: 20px;
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.metric-card {
+  background: var(--bg-tertiary);
+  border-radius: 8px;
+  padding: 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.metric-card .metric-icon {
+  opacity: 0.9;
+}
+
+.metric-content {
+  display: flex;
+  flex-direction: column;
+  gap: 0.125rem;
+}
+
+.metric-label {
+  font-size: 0.7rem;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.est-badge {
+  font-size: 0.6rem;
+  background: var(--bg-secondary);
+  padding: 0.1rem 0.3rem;
+  border-radius: 4px;
+  color: var(--text-tertiary);
+}
+
+.metric-value {
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  display: flex;
+  align-items: baseline;
+  gap: 0.35rem;
+}
+
+.metric-subvalue {
+  font-size: 0.7rem;
+  color: var(--text-tertiary);
+  font-weight: 400;
+}
+
+.status-good {
+  color: #10b981;
+}
+
+.status-warning {
+  color: #f59e0b;
+}
+
+.metric-bar {
+  height: 4px;
+  background: var(--bg-primary);
+  border-radius: 2px;
+  overflow: hidden;
+  margin-top: 0.25rem;
+}
+
+.bar-fill {
+  height: 100%;
+  border-radius: 2px;
+  transition: width 0.5s ease, background-color 0.3s ease;
+}
+
+.battery-charging {
+  animation: pulse 2s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+
+@keyframes pulse-highlight {
+  0% { 
+    box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.4);
+    background-color: var(--bg-tertiary);
+  }
+  50% { 
+    box-shadow: 0 0 0 4px rgba(59, 130, 246, 0.2);
+    background-color: rgba(59, 130, 246, 0.1);
+  }
+  100% { 
+    box-shadow: 0 0 0 0 rgba(59, 130, 246, 0);
+    background-color: var(--bg-tertiary);
+  }
+}
+
+.pulse-highlight {
+  animation: pulse-highlight 1.5s ease-out;
+}
+
+.cost-badge.pulse-highlight {
+  animation: pulse-highlight 1.5s ease-out;
+}
+
+.cost-explanation {
+  background: var(--bg-tertiary);
+  border-radius: 8px;
+  padding: 0.75rem;
+}
+
+.explanation-title {
+  font-size: 0.7rem;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 0.5rem;
+}
+
+.explanation-factors {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+.factor {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.8rem;
+}
+
+.factor-name {
+  color: var(--text-secondary);
+}
+
+.factor-value {
+  color: var(--text-primary);
+  font-weight: 500;
+  font-family: 'SF Mono', Monaco, monospace;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.last-updated {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.7rem;
+  color: var(--text-tertiary);
+}
+
+.refresh-indicator {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  margin-top: 0.75rem;
+  font-size: 0.7rem;
+  color: var(--text-tertiary);
+}
+
+.refresh-indicator .spin {
+  animation: spin 1s linear infinite;
+}
+
+@media (max-width: 600px) {
+  .metrics-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  
+  .metric-value {
+    font-size: 1rem;
+  }
+  
+  .header-right {
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 0.35rem;
+  }
+}

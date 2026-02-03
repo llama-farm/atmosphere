@@ -23,6 +23,23 @@ const STATUS_COLORS = {
   active: '#3b82f6',
 };
 
+// Cost-based colors for node visualization
+const getCostColor = (cost) => {
+  if (cost === null || cost === undefined) return '#6b7280'; // Unknown - gray
+  if (cost <= 1.2) return '#10b981'; // Green - cheap
+  if (cost <= 2.0) return '#f59e0b'; // Yellow - moderate
+  if (cost <= 3.0) return '#f97316'; // Orange - expensive
+  return '#ef4444'; // Red - very expensive
+};
+
+const getCostLabel = (cost) => {
+  if (cost === null || cost === undefined) return 'Unknown';
+  if (cost <= 1.2) return 'Low Cost';
+  if (cost <= 2.0) return 'Moderate';
+  if (cost <= 3.0) return 'High Cost';
+  return 'Very High';
+};
+
 export const MeshTopology = ({ wsData }) => {
   const svgRef = useRef(null);
   const [nodes, setNodes] = useState([]);
@@ -31,56 +48,67 @@ export const MeshTopology = ({ wsData }) => {
   const simulationRef = useRef(null);
 
   useEffect(() => {
-    // Fetch initial mesh topology
-    fetch('/v1/mesh/topology')
+    // Fetch initial mesh topology from real API
+    fetch('/api/mesh/topology')
       .then(res => res.json())
       .then(data => {
         const nodeData = data.nodes?.map((node, i) => ({
           id: node.id || `node-${i}`,
           name: node.name || `Node ${i + 1}`,
           capabilities: node.capabilities || [],
-          capabilityTypes: node.capabilityTypes || [],
+          capabilityTypes: node.capabilityTypes || ['llm'],
           triggers: node.triggers || [],
           tools: node.tools || [],
-          status: node.status || 'active',
+          status: node.isLeader ? 'leader' : (node.status || 'active'),
+          cost: node.cost,
+          costFactors: node.costFactors,
           x: Math.random() * 800,
           y: Math.random() * 600,
         })) || [];
 
-        const linkData = data.connections?.map(conn => ({
-          source: conn.from,
-          target: conn.to,
+        const linkData = data.links?.map(conn => ({
+          source: conn.source,
+          target: conn.target,
           strength: conn.strength || 1,
         })) || [];
 
-        setNodes(nodeData);
-        setLinks(linkData);
+        if (nodeData.length > 0) {
+          setNodes(nodeData);
+          setLinks(linkData);
+        } else {
+          // Use demo data if no real nodes
+          useDemoData();
+        }
       })
       .catch(err => {
         console.error('Failed to fetch topology:', err);
-        // Create demo data with capability types
-        const capTypes = ['sensor/camera', 'sensor/voice', 'llm', 'search', 'vision', 'tool'];
-        const demoNodes = Array.from({ length: 8 }, (_, i) => ({
-          id: `node-${i}`,
-          name: `Node ${i + 1}`,
-          capabilities: [`cap-${i}`, `cap-${i + 1}`],
-          capabilityTypes: [capTypes[i % capTypes.length]],
-          triggers: i % 2 === 0 ? ['motion_detected', 'sound_detected'] : ['query_complete'],
-          tools: i % 3 === 0 ? ['get_frame', 'get_history'] : ['execute', 'search'],
-          status: i % 4 === 0 ? 'leader' : i % 5 === 0 ? 'busy' : 'active',
-          x: Math.random() * 800,
-          y: Math.random() * 600,
-        }));
-
-        const demoLinks = Array.from({ length: 12 }, (_, i) => ({
-          source: `node-${Math.floor(Math.random() * 8)}`,
-          target: `node-${Math.floor(Math.random() * 8)}`,
-          strength: Math.random(),
-        }));
-
-        setNodes(demoNodes);
-        setLinks(demoLinks);
+        useDemoData();
       });
+      
+    function useDemoData() {
+      // Create demo data with capability types
+      const capTypes = ['sensor/camera', 'sensor/voice', 'llm', 'search', 'vision', 'tool'];
+      const demoNodes = Array.from({ length: 6 }, (_, i) => ({
+        id: `node-${i}`,
+        name: `Node ${i + 1}`,
+        capabilities: [`cap-${i}`, `cap-${i + 1}`],
+        capabilityTypes: [capTypes[i % capTypes.length]],
+        triggers: i % 2 === 0 ? ['motion_detected', 'sound_detected'] : ['query_complete'],
+        tools: i % 3 === 0 ? ['get_frame', 'get_history'] : ['execute', 'search'],
+        status: i % 4 === 0 ? 'leader' : i % 5 === 0 ? 'busy' : 'active',
+        x: Math.random() * 800,
+        y: Math.random() * 600,
+      }));
+
+      const demoLinks = Array.from({ length: 8 }, (_, i) => ({
+        source: `node-${i % 6}`,
+        target: `node-${(i + 1) % 6}`,
+        strength: Math.random(),
+      }));
+
+      setNodes(demoNodes);
+      setLinks(demoLinks);
+    }
   }, []);
 
   useEffect(() => {
@@ -134,6 +162,16 @@ export const MeshTopology = ({ wsData }) => {
         .on('start', dragstarted)
         .on('drag', dragged)
         .on('end', dragended));
+
+    // Cost ring (outer circle indicating cost level)
+    node.append('circle')
+      .attr('r', 36)
+      .attr('fill', 'none')
+      .attr('stroke', d => getCostColor(d.cost))
+      .attr('stroke-width', 3)
+      .attr('stroke-dasharray', d => d.cost === null || d.cost === undefined ? '4,4' : 'none')
+      .attr('opacity', 0.7)
+      .attr('class', 'cost-ring');
 
     // Node circles with status-based styling
     node.append('circle')
@@ -232,6 +270,21 @@ export const MeshTopology = ({ wsData }) => {
     node.on('mouseover', (event, d) => {
       const capType = d.capabilityTypes?.[0] || 'default';
       const typeInfo = CAPABILITY_TYPES[capType] || CAPABILITY_TYPES.default;
+      const costColor = getCostColor(d.cost);
+      const costLabel = getCostLabel(d.cost);
+      
+      // Build cost details if available
+      let costDetails = '';
+      if (d.costFactors) {
+        const cf = d.costFactors;
+        costDetails = `
+          <div style="font-size: 10px; color: #6b7280; margin-top: 4px; border-top: 1px solid #374151; padding-top: 4px;">
+            ${cf.plugged_in ? '🔌 Plugged In' : `🔋 ${cf.battery_percent?.toFixed(0)}%`}
+            · CPU ${(cf.cpu_load * 100).toFixed(0)}%
+            · Mem ${cf.memory_percent?.toFixed(0)}%
+          </div>
+        `;
+      }
       
       tooltip.transition().duration(200).style('opacity', 1);
       tooltip.html(`
@@ -242,12 +295,16 @@ export const MeshTopology = ({ wsData }) => {
         <div style="font-size: 11px; color: #9ca3af;">
           Status: <span style="color: ${STATUS_COLORS[d.status]}">${d.status}</span>
         </div>
+        <div style="font-size: 11px; color: ${costColor}; margin-top: 4px; font-weight: 600;">
+          ⚡ ${d.cost !== null && d.cost !== undefined ? d.cost.toFixed(2) + 'x' : '?'} · ${costLabel}
+        </div>
         <div style="font-size: 11px; color: #f97316; margin-top: 4px;">
           ↑ ${d.triggers?.length || 0} triggers
         </div>
         <div style="font-size: 11px; color: #3b82f6;">
           ↓ ${d.tools?.length || 0} tools
         </div>
+        ${costDetails}
       `)
         .style('left', (event.pageX + 10) + 'px')
         .style('top', (event.pageY - 10) + 'px');
@@ -355,6 +412,19 @@ export const MeshTopology = ({ wsData }) => {
           <div className="legend-item">
             <div className="legend-badge tool"></div>
             <span>Tools (↓)</span>
+          </div>
+          <div className="legend-divider"></div>
+          <div className="legend-item">
+            <div className="legend-ring cost-low"></div>
+            <span>Low Cost</span>
+          </div>
+          <div className="legend-item">
+            <div className="legend-ring cost-moderate"></div>
+            <span>Moderate</span>
+          </div>
+          <div className="legend-item">
+            <div className="legend-ring cost-high"></div>
+            <span>High Cost</span>
           </div>
         </div>
       </div>

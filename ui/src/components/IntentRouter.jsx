@@ -32,7 +32,7 @@ export const IntentRouter = () => {
         setRoutingPath(prev => [...prev, steps[i]]);
       }
 
-      const response = await fetch('/v1/route', {
+      const response = await fetch('/api/route', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ intent }),
@@ -41,9 +41,9 @@ export const IntentRouter = () => {
       const data = await response.json();
       
       setResult({
-        node: data.node || 'node-1',
+        node: data.node_id || data.node || 'local',
         capability: data.capability || intent.split(' ')[0],
-        confidence: data.confidence || Math.random() * 0.3 + 0.7,
+        confidence: data.score || Math.random() * 0.3 + 0.7,
         executionTime: data.execution_time || Math.random() * 200 + 100,
       });
     } catch (err) {

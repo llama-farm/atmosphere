@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Activity, Wifi, Zap, Users, ArrowUp, ArrowDown, Camera, Mic, Brain, Search, Wrench } from 'lucide-react';
+import { CostMetrics } from './CostMetrics';
 import './Dashboard.css';
 
 export const Dashboard = ({ wsData }) => {
@@ -20,57 +21,68 @@ export const Dashboard = ({ wsData }) => {
   const [recentActivity, setRecentActivity] = useState([]);
 
   useEffect(() => {
-    // Fetch initial stats
-    fetch('/v1/mesh/status')
+    // Fetch initial stats from real API
+    fetch('/api/mesh/status')
       .then(res => res.json())
       .then(data => {
         setStats({
-          connectedNodes: data.nodes?.length || 0,
+          connectedNodes: data.node_count || data.peer_count + 1 || 1,
           totalCapabilities: data.capabilities?.length || 0,
-          activeAgents: data.active_agents || 0,
-          meshHealth: data.health || 100,
+          activeAgents: data.capabilities?.length || 0,
+          meshHealth: 100,
         });
-
-        // Process capability breakdown
-        if (data.capabilities) {
-          const byType = {};
-          data.capabilities.forEach(cap => {
-            const type = cap.type || 'other';
-            byType[type] = (byType[type] || 0) + 1;
-          });
-          setCapabilityStats(prev => ({
-            ...prev,
-            total: data.capabilities.length,
-            byType,
-          }));
-        }
       })
       .catch(err => {
         console.error('Failed to fetch mesh status:', err);
+      });
+
+    // Fetch capabilities
+    fetch('/api/capabilities')
+      .then(res => res.json())
+      .then(data => {
+        // Process capability breakdown
+        const byType = {};
+        data.forEach(cap => {
+          const type = guessCapabilityType(cap.label, cap.handler);
+          byType[type] = (byType[type] || 0) + 1;
+        });
+        
+        setCapabilityStats(prev => ({
+          ...prev,
+          total: data.length,
+          byType,
+        }));
+        
+        setStats(prev => ({
+          ...prev,
+          totalCapabilities: data.length,
+          activeAgents: data.length,
+        }));
+      })
+      .catch(err => {
+        console.error('Failed to fetch capabilities:', err);
         // Set demo capability stats
         setCapabilityStats({
-          total: 12,
+          total: 5,
           byType: {
-            'sensor/camera': 3,
-            'sensor/voice': 2,
-            'llm': 4,
-            'search': 2,
-            'tool': 1,
+            'llm': 3,
+            'tool': 2,
           },
-          recentTriggers: [
-            { id: 1, name: 'motion_detected', capability: 'front-door', time: Date.now() - 5000 },
-            { id: 2, name: 'person_detected', capability: 'backyard-cam', time: Date.now() - 15000 },
-            { id: 3, name: 'wake_word', capability: 'alexa-kitchen', time: Date.now() - 30000 },
-            { id: 4, name: 'sound_detected', capability: 'baby-monitor', time: Date.now() - 45000 },
-            { id: 5, name: 'query_complete', capability: 'search-node', time: Date.now() - 60000 },
-          ],
-          activeToolCalls: [
-            { id: 1, tool: 'get_frame', capability: 'front-door', status: 'running' },
-            { id: 2, tool: 'generate', capability: 'llm-1', status: 'running' },
-          ],
+          recentTriggers: [],
+          activeToolCalls: [],
         });
       });
   }, []);
+
+  const guessCapabilityType = (label, handler) => {
+    const lower = ((label || '') + ' ' + (handler || '')).toLowerCase();
+    if (lower.includes('camera') || lower.includes('vision') || lower.includes('image')) return 'sensor/camera';
+    if (lower.includes('voice') || lower.includes('audio') || lower.includes('speech')) return 'sensor/voice';
+    if (lower.includes('llm') || lower.includes('chat') || lower.includes('complete')) return 'llm';
+    if (lower.includes('search') || lower.includes('query')) return 'search';
+    if (lower.includes('tool') || lower.includes('action')) return 'tool';
+    return 'llm';
+  };
 
   useEffect(() => {
     // Update activity from WebSocket
@@ -173,6 +185,9 @@ export const Dashboard = ({ wsData }) => {
         />
       </div>
 
+      {/* Cost Metrics Panel */}
+      <CostMetrics refreshInterval={10000} />
+
       {/* Capability Summary Panel */}
       <div className="capability-summary-panel">
         <h2>
@@ -251,7 +266,7 @@ export const Dashboard = ({ wsData }) => {
         <h2>Recent Activity</h2>
         <div className="activity-list">
           {recentActivity.length === 0 ? (
-            <div className="activity-empty">No recent activity</div>
+            <div className="activity-empty">Waiting for mesh activity...</div>
           ) : (
             recentActivity.map(activity => (
               <div key={activity.id} className="activity-item slide-in">

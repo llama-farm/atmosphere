@@ -75,14 +75,34 @@ class LlamaFarmBackend:
                 return {}
             return await resp.json()
     
-    async def list_projects(self) -> List[Dict[str, Any]]:
-        """List available projects."""
+    async def list_projects(self, namespace: Optional[str] = None) -> List[Dict[str, Any]]:
+        """
+        List available projects.
+        
+        Args:
+            namespace: Filter by namespace (e.g., "discoverable")
+            
+        Returns:
+            List of project dictionaries
+        """
         session = await self._get_session()
-        async with session.get(f"{self.config.base_url}/v1/projects") as resp:
+        params = {}
+        if namespace:
+            params["namespace"] = namespace
+            
+        async with session.get(f"{self.config.base_url}/v1/projects", params=params) as resp:
             if resp.status != 200:
                 return []
             data = await resp.json()
             return data.get("data", [])
+    
+    async def list_discoverable_projects(self) -> List[Dict[str, Any]]:
+        """
+        List projects in the 'discoverable' namespace.
+        
+        These are projects that should be exposed to the mesh.
+        """
+        return await self.list_projects(namespace="discoverable")
     
     async def list_models(self) -> List[Dict[str, Any]]:
         """List available models."""
@@ -235,8 +255,9 @@ class LlamaFarmBackend:
     
     async def import_capabilities(self) -> Dict[str, List[str]]:
         """
-        Import capabilities from LlamaFarm projects.
+        Import capabilities from LlamaFarm projects in the 'Discoverable' namespace.
         
+        Only projects explicitly marked as discoverable will be exposed to the mesh.
         Returns a mapping of capability type to list of capability IDs.
         """
         capabilities = {
@@ -248,13 +269,18 @@ class LlamaFarmBackend:
         }
         
         try:
-            projects = await self.list_projects()
+            # ONLY use discoverable namespace - these are capabilities meant for mesh exposure
+            projects = await self.list_discoverable_projects()
+            logger.info(f"Found {len(projects)} discoverable LlamaFarm projects")
+            
             for project in projects:
                 project_id = project.get("id", "")
                 project_type = project.get("type", "")
+                project_name = project.get("name", project_id)
                 
                 if project_type in capabilities:
                     capabilities[project_type].append(project_id)
+                    logger.debug(f"Imported discoverable capability: {project_name} ({project_type})")
         except Exception as e:
             logger.warning(f"Failed to import LlamaFarm capabilities: {e}")
         

@@ -13,7 +13,7 @@ const MESSAGE_TYPES = {
   error: { color: '#ef4444', label: 'Error', icon: XCircle },
 };
 
-export const GossipFeed = ({ wsData }) => {
+export const GossipFeed = ({ wsData, demoMode = false }) => {
   const [messages, setMessages] = useState([]);
   const [filter, setFilter] = useState('all'); // all, capabilities, nodes, triggers, tools, errors
 
@@ -36,8 +36,13 @@ export const GossipFeed = ({ wsData }) => {
     }
   }, [wsData]);
 
-  // Generate some initial demo messages with new types
+  // Only load demo messages if demoMode is enabled
   useEffect(() => {
+    if (!demoMode) {
+      // Start with empty feed in production mode
+      return;
+    }
+    
     const demoMessages = [
       { id: 1, type: 'TRIGGER_EVENT', node: 'camera-1', capability: 'front-door', trigger: 'motion_detected', message: 'Motion detected at front door', timestamp: new Date(Date.now() - 5000), success: true },
       { id: 2, type: 'TOOL_CALL', node: 'agent-1', capability: 'front-door', tool: 'get_frame', message: 'Agent requested camera frame', timestamp: new Date(Date.now() - 8000), success: true },
@@ -52,7 +57,7 @@ export const GossipFeed = ({ wsData }) => {
     ];
     
     setMessages(demoMessages);
-  }, []);
+  }, [demoMode]);
 
   const filteredMessages = messages.filter(msg => {
     if (filter === 'all') return true;

@@ -8,7 +8,7 @@ export const AgentInspector = ({ wsData }) => {
 
   const fetchAgents = async () => {
     try {
-      const response = await fetch('/v1/agents');
+      const response = await fetch('/api/agents');
       const data = await response.json();
       setAgents(data.agents || []);
     } catch (err) {
@@ -33,10 +33,9 @@ export const AgentInspector = ({ wsData }) => {
     const newStatus = currentStatus === 'running' ? 'suspended' : 'running';
     
     try {
-      await fetch(`/v1/agents/${agentId}`, {
+      await fetch(`/api/agents/${agentId}?status=${newStatus}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: newStatus }),
       });
       
       setAgents(prev => prev.map(agent => 

@@ -11,59 +11,100 @@ from typing import Optional, List, Dict, Any
 
 
 class LlamaFarmDiscovery:
-    """Discover LlamaFarm projects and specialized models"""
+    """
+    Discover LlamaFarm projects and models via API.
     
-    LLAMAFARM_HOME = Path.home() / ".llamafarm"
+    By default, only returns the "discoverable" namespace - the subset
+    of LlamaFarm capabilities that should be exposed to the mesh.
+    """
+    
+    def __init__(
+        self, 
+        base_url: str = "http://localhost:14345",
+        namespace: str = "discoverable"
+    ):
+        self.base_url = base_url
+        self.namespace = namespace  # Filter to this namespace
     
     def discover_projects(self) -> list:
-        """List all projects with their sub-projects"""
-        projects_dir = self.LLAMAFARM_HOME / "projects"
-        if not projects_dir.exists():
-            return []
+        """
+        List projects from LlamaFarm API, filtered by namespace.
         
-        projects = []
-        for project in projects_dir.iterdir():
-            if project.is_dir() and not project.name.startswith('.'):
-                try:
-                    sub_projects = [p.name for p in project.iterdir() if p.is_dir() and not p.name.startswith('.')]
-                    projects.append({
-                        "name": project.name,
-                        "path": str(project),
-                        "sub_projects": sub_projects[:10],  # First 10
-                        "sub_project_count": len(sub_projects)
-                    })
-                except PermissionError:
-                    continue
-        return projects
+        Only returns projects in the configured namespace (default: "discoverable").
+        This ensures Atmosphere only exposes what's meant for the mesh.
+        """
+        import requests
+        
+        try:
+            # Query LlamaFarm API for projects
+            response = requests.get(f"{self.base_url}/api/projects", timeout=5)
+            if response.status_code != 200:
+                return []
+            
+            all_projects = response.json()
+            
+            # Filter to only the specified namespace
+            if self.namespace:
+                # If namespace is set, only return that namespace's projects
+                for project in all_projects:
+                    if project.get("name") == self.namespace:
+                        return [{
+                            "name": project.get("name"),
+                            "sub_projects": project.get("sub_projects", [])[:10],
+                            "sub_project_count": len(project.get("sub_projects", []))
+                        }]
+                return []  # Namespace not found
+            
+            return all_projects
+            
+        except Exception as e:
+            # Fallback: return empty if API not available
+            return []
     
     def discover_models(self) -> dict:
-        """List all specialized models by category"""
-        models_dir = self.LLAMAFARM_HOME / "models"
-        if not models_dir.exists():
-            return {}
+        """
+        List models from LlamaFarm API.
         
-        categories = {}
-        for category in models_dir.iterdir():
-            if category.is_dir() and not category.name.startswith('.'):
-                try:
-                    models = [m.name for m in category.iterdir() if not m.name.startswith('.')]
-                    categories[category.name] = {
-                        "count": len(models),
-                        "samples": models[:5]  # First 5
-                    }
-                except PermissionError:
-                    continue
-        return categories
+        Returns model counts by category, filtered to what's available
+        for mesh operations.
+        """
+        import requests
+        
+        try:
+            response = requests.get(f"{self.base_url}/v1/models", timeout=5)
+            if response.status_code != 200:
+                return {}
+            
+            models = response.json().get("data", [])
+            
+            # Group by category (prefix before /)
+            categories = {}
+            for model in models:
+                model_id = model.get("id", "")
+                category = model_id.split("/")[0] if "/" in model_id else "general"
+                
+                if category not in categories:
+                    categories[category] = {"count": 0, "samples": []}
+                
+                categories[category]["count"] += 1
+                if len(categories[category]["samples"]) < 3:
+                    categories[category]["samples"].append(model_id)
+            
+            return categories
+            
+        except Exception:
+            return {}
     
     def get_config(self) -> dict:
-        """Load LlamaFarm config"""
-        config_path = self.LLAMAFARM_HOME / "config.yaml"
-        if config_path.exists():
-            try:
-                import yaml
-                return yaml.safe_load(config_path.read_text())
-            except Exception:
-                pass
+        """Get LlamaFarm config via API."""
+        import requests
+        
+        try:
+            response = requests.get(f"{self.base_url}/api/config", timeout=5)
+            if response.status_code == 200:
+                return response.json()
+        except Exception:
+            pass
         return {}
 
 

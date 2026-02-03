@@ -1243,12 +1243,16 @@ async def call_llamafarm_llm(prompt: str, model: str = None) -> str:
 
 
 @router.get("/integrations")
-async def list_integrations():
+async def list_integrations(all: bool = False):
     """
     Discover and list available backend integrations.
     
+    Args:
+        all: If True, show all LlamaFarm namespaces. 
+             If False (default), only show "discoverable" namespace.
+    
     Scans for:
-    - LlamaFarm (port 14345) with full project/model discovery
+    - LlamaFarm (port 14345) - filtered to discoverable namespace by default
     - Ollama (port 11434)
     - Other discovered backends via mDNS
     """
@@ -1258,7 +1262,7 @@ async def list_integrations():
     
     integrations = []
     
-    # Check LlamaFarm with full discovery
+    # Check LlamaFarm with filtered discovery
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(1)
@@ -1266,28 +1270,24 @@ async def list_integrations():
         sock.close()
         
         if result == 0:
-            discovery = LlamaFarmDiscovery()
+            # Use namespace filter: None = show all, "discoverable" = filtered
+            namespace = None if all else "discoverable"
+            discovery = LlamaFarmDiscovery(namespace=namespace)
             
-            # Get Ollama models from LlamaFarm
-            ollama_models = []
-            ollama_model_count = 0
+            # Get models from LlamaFarm
+            model_count = 0
+            models_sample = []
             try:
                 response = requests.get('http://localhost:14345/v1/models', timeout=2)
                 models = response.json().get('data', [])
-                ollama_model_count = len(models)
-                ollama_models = [m.get('id', 'unknown') for m in models[:5]]  # First 5
+                model_count = len(models)
+                models_sample = [m.get('id', 'unknown') for m in models[:5]]
             except:
                 pass
             
-            # Discover projects and specialized models
+            # Discover projects (filtered by namespace)
             projects = discovery.discover_projects()
             specialized_models = discovery.discover_models()
-            config = discovery.get_config()
-            
-            # Calculate total capabilities
-            total_models = ollama_model_count
-            for category, info in specialized_models.items():
-                total_models += info.get('count', 0)
             
             integrations.append({
                 "id": "llamafarm",
@@ -1295,20 +1295,15 @@ async def list_integrations():
                 "type": "llm_backend",
                 "address": "localhost:14345",
                 "status": "healthy",
-                "capabilities": ["chat", "embeddings", "completions", "classification", "anomaly-detection", "routing"],
+                "capabilities": ["chat", "embeddings", "completions"],
                 "connected": True,
                 
-                # Rich LlamaFarm data
-                "config": config,
+                # Filtered LlamaFarm data
                 "projects": projects,
                 "specialized_models": specialized_models,
-                "ollama_models": ollama_models,
-                "ollama_model_count": ollama_model_count,
-                "total_model_count": total_models,
-                
-                # Legacy fields for compatibility
-                "models": ollama_models,
-                "model_count": ollama_model_count,
+                "models": models_sample,
+                "model_count": model_count,
+                "namespace": namespace or "all",
             })
         else:
             integrations.append({

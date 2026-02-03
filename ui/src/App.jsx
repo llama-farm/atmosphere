@@ -7,6 +7,11 @@ import { AgentInspector } from './components/AgentInspector';
 import { GossipFeed } from './components/GossipFeed';
 import { JoinPanel } from './components/JoinPanel';
 import { IntegrationPanel } from './components/IntegrationPanel';
+import { BidirectionalFlow } from './components/BidirectionalFlow';
+import { Capabilities } from './components/Capabilities';
+import { ApprovalPanel } from './components/ApprovalPanel';
+import { TestingPanel } from './components/TestingPanel';
+import { ProjectsPanel } from './components/ProjectsPanel';
 import { 
   LayoutDashboard, 
   Network, 
@@ -16,24 +21,45 @@ import {
   Link2,
   Puzzle,
   Menu,
-  X
+  X,
+  ArrowUpDown,
+  Layers,
+  Shield,
+  FlaskConical,
+  Folder
 } from 'lucide-react';
 import './App.css';
 
 const pages = [
   { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard, component: Dashboard },
   { id: 'topology', label: 'Mesh Topology', icon: Network, component: MeshTopology },
+  { id: 'flow', label: 'Capability Flow', icon: ArrowUpDown, component: BidirectionalFlow },
+  { id: 'capabilities', label: 'Capabilities', icon: Layers, component: Capabilities },
   { id: 'router', label: 'Intent Router', icon: Zap, component: IntentRouter },
   { id: 'agents', label: 'Agent Inspector', icon: Activity, component: AgentInspector },
   { id: 'integrations', label: 'Integrations', icon: Puzzle, component: IntegrationPanel },
+  { id: 'projects', label: 'Projects', icon: Folder, component: ProjectsPanel },
+  { id: 'testing', label: 'Testing', icon: FlaskConical, component: TestingPanel },
   { id: 'gossip', label: 'Gossip Feed', icon: Radio, component: GossipFeed },
   { id: 'join', label: 'Join Mesh', icon: Link2, component: JoinPanel },
+  { id: 'settings', label: 'Settings', icon: Shield, component: ApprovalPanel },
 ];
 
 function App() {
   const [currentPage, setCurrentPage] = useState('dashboard');
   const [menuOpen, setMenuOpen] = useState(false);
+  const [demoMode, setDemoMode] = useState(() => {
+    // Load from localStorage, default to false
+    const saved = localStorage.getItem('atmosphere_demo_mode');
+    return saved === 'true';
+  });
   const { isConnected, lastMessage } = useWebSocket('/ws');
+
+  // Persist demoMode changes
+  const toggleDemoMode = (enabled) => {
+    setDemoMode(enabled);
+    localStorage.setItem('atmosphere_demo_mode', enabled.toString());
+  };
 
   const CurrentComponent = pages.find(p => p.id === currentPage)?.component || Dashboard;
 
@@ -121,7 +147,11 @@ function App() {
       )}
 
       <main className="main-content">
-        <CurrentComponent wsData={lastMessage} />
+        <CurrentComponent 
+          wsData={lastMessage} 
+          demoMode={demoMode}
+          onDemoModeChange={toggleDemoMode}
+        />
       </main>
     </div>
   );
