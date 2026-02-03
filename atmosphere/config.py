@@ -28,12 +28,13 @@ DEFAULT_GOSSIP_PORT = 11450  # TCP gossip protocol
 @dataclass
 class BackendConfig:
     """Configuration for an AI backend."""
-    type: str  # ollama, llamafarm, vllm, etc.
+    type: str  # ollama, llamafarm, universal, vllm, etc.
     host: str = "localhost"
-    port: int = 11434  # Backend ports vary: Ollama=11434, LlamaFarm=14345
+    port: int = 11434  # Backend ports vary: Ollama=11434, LlamaFarm=14345, Universal=11540
     api_key: Optional[str] = None
     models: List[str] = field(default_factory=list)
     enabled: bool = True
+    priority: int = 10  # Lower = higher priority for routing
     
     def to_dict(self) -> dict:
         return {
@@ -42,12 +43,16 @@ class BackendConfig:
             "port": self.port,
             "api_key": self.api_key,
             "models": self.models,
-            "enabled": self.enabled
+            "enabled": self.enabled,
+            "priority": self.priority
         }
     
     @classmethod
     def from_dict(cls, data: dict) -> "BackendConfig":
-        return cls(**data)
+        # Filter to only known fields to handle config evolution
+        known_fields = {"type", "host", "port", "api_key", "models", "enabled", "priority"}
+        filtered = {k: v for k, v in data.items() if k in known_fields}
+        return cls(**filtered)
 
 
 @dataclass
@@ -117,6 +122,9 @@ class Config:
     mdns_enabled: bool = True
     gossip_interval: int = 30
     
+    # Relay server for NAT traversal
+    relay_url: Optional[str] = None  # e.g., wss://atmosphere-relay-production.up.railway.app
+    
     # Capabilities
     capabilities: List[str] = field(default_factory=list)
     
@@ -156,6 +164,7 @@ class Config:
             "server": self.server.to_dict(),
             "mdns_enabled": self.mdns_enabled,
             "gossip_interval": self.gossip_interval,
+            "relay_url": self.relay_url,
             "capabilities": self.capabilities
         }
         
@@ -182,6 +191,7 @@ class Config:
             node_name=data.get("node_name"),
             mdns_enabled=data.get("mdns_enabled", True),
             gossip_interval=data.get("gossip_interval", 30),
+            relay_url=data.get("relay_url"),
             capabilities=data.get("capabilities", [])
         )
         
