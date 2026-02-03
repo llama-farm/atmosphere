@@ -1,0 +1,114 @@
+# =============================================================================
+# Atmosphere Docker Compose
+# The Internet of Intent - semantic mesh routing for AI
+# =============================================================================
+#
+# Quick Start:
+#   docker-compose up -d
+#
+# With GPU support (for Ollama):
+#   docker-compose --profile gpu up -d
+#
+# View logs:
+#   docker-compose logs -f atmosphere
+#
+# =============================================================================
+
+version: '3.8'
+
+services:
+  # ---------------------------------------------------------------------------
+  # Atmosphere - Main service
+  # ---------------------------------------------------------------------------
+  atmosphere:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: llama-farm/atmosphere:latest
+    container_name: atmosphere
+    restart: unless-stopped
+    ports:
+      - "8000:8000"      # API server
+      - "11450:11450"    # Mesh gossip (optional)
+    volumes:
+      - atmosphere-data:/data
+    environment:
+      - ATMOSPHERE_NODE_NAME=docker-node
+      - ATMOSPHERE_LOG_LEVEL=info
+      # Connect to Ollama if available
+      - OLLAMA_HOST=ollama:11434
+    networks:
+      - atmosphere-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # ---------------------------------------------------------------------------
+  # Ollama - Local LLM server (optional)
+  # ---------------------------------------------------------------------------
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    restart: unless-stopped
+    profiles:
+      - ollama
+      - gpu
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    networks:
+      - atmosphere-net
+    # GPU support - uncomment for NVIDIA GPUs
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+  # ---------------------------------------------------------------------------
+  # Ollama with GPU (separate profile)
+  # ---------------------------------------------------------------------------
+  ollama-gpu:
+    image: ollama/ollama:latest
+    container_name: ollama-gpu
+    restart: unless-stopped
+    profiles:
+      - gpu
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    networks:
+      - atmosphere-net
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+# =============================================================================
+# Volumes
+# =============================================================================
+volumes:
+  atmosphere-data:
+    driver: local
+  ollama-data:
+    driver: local
+
+# =============================================================================
+# Networks
+# =============================================================================
+networks:
+  atmosphere-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16

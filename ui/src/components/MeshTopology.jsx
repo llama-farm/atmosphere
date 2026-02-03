@@ -1,11 +1,33 @@
 import React, { useEffect, useRef, useState } from 'react';
 import * as d3 from 'd3';
+import { Camera, Mic, Brain, Search, Eye, Wrench, Zap, ArrowUp, ArrowDown } from 'lucide-react';
 import './MeshTopology.css';
+
+// Capability type icons and colors
+const CAPABILITY_TYPES = {
+  'sensor/camera': { icon: '📷', color: '#10b981', label: 'Camera' },
+  'sensor/voice': { icon: '🎤', color: '#f97316', label: 'Voice' },
+  'llm': { icon: '🧠', color: '#8b5cf6', label: 'LLM' },
+  'search': { icon: '🔍', color: '#3b82f6', label: 'Search' },
+  'vision': { icon: '👁', color: '#ec4899', label: 'Vision' },
+  'tool': { icon: '🔧', color: '#6b7280', label: 'Tool' },
+  'default': { icon: '⚡', color: '#f59e0b', label: 'Capability' },
+};
+
+const STATUS_COLORS = {
+  online: '#10b981',
+  busy: '#f59e0b',
+  degraded: '#ef4444',
+  offline: '#6b7280',
+  leader: '#f59e0b',
+  active: '#3b82f6',
+};
 
 export const MeshTopology = ({ wsData }) => {
   const svgRef = useRef(null);
   const [nodes, setNodes] = useState([]);
   const [links, setLinks] = useState([]);
+  const [hoveredNode, setHoveredNode] = useState(null);
   const simulationRef = useRef(null);
 
   useEffect(() => {
@@ -17,6 +39,9 @@ export const MeshTopology = ({ wsData }) => {
           id: node.id || `node-${i}`,
           name: node.name || `Node ${i + 1}`,
           capabilities: node.capabilities || [],
+          capabilityTypes: node.capabilityTypes || [],
+          triggers: node.triggers || [],
+          tools: node.tools || [],
           status: node.status || 'active',
           x: Math.random() * 800,
           y: Math.random() * 600,
@@ -33,12 +58,16 @@ export const MeshTopology = ({ wsData }) => {
       })
       .catch(err => {
         console.error('Failed to fetch topology:', err);
-        // Create demo data
+        // Create demo data with capability types
+        const capTypes = ['sensor/camera', 'sensor/voice', 'llm', 'search', 'vision', 'tool'];
         const demoNodes = Array.from({ length: 8 }, (_, i) => ({
           id: `node-${i}`,
           name: `Node ${i + 1}`,
           capabilities: [`cap-${i}`, `cap-${i + 1}`],
-          status: i % 4 === 0 ? 'leader' : 'active',
+          capabilityTypes: [capTypes[i % capTypes.length]],
+          triggers: i % 2 === 0 ? ['motion_detected', 'sound_detected'] : ['query_complete'],
+          tools: i % 3 === 0 ? ['get_frame', 'get_history'] : ['execute', 'search'],
+          status: i % 4 === 0 ? 'leader' : i % 5 === 0 ? 'busy' : 'active',
           x: Math.random() * 800,
           y: Math.random() * 600,
         }));
@@ -106,55 +135,126 @@ export const MeshTopology = ({ wsData }) => {
         .on('drag', dragged)
         .on('end', dragended));
 
-    // Node circles
+    // Node circles with status-based styling
     node.append('circle')
       .attr('r', 30)
       .attr('fill', d => {
         switch (d.status) {
           case 'leader': return 'url(#gradient-leader)';
+          case 'busy': return 'url(#gradient-busy)';
           case 'active': return 'url(#gradient-active)';
           default: return 'url(#gradient-inactive)';
         }
       })
-      .attr('stroke', d => {
-        switch (d.status) {
-          case 'leader': return '#f59e0b';
-          case 'active': return '#3b82f6';
-          default: return '#6b7280';
-        }
-      })
+      .attr('stroke', d => STATUS_COLORS[d.status] || '#6b7280')
       .attr('stroke-width', 2)
       .attr('class', d => d.status === 'leader' ? 'glow-node' : '');
 
-    // Node labels
+    // Capability type icon (emoji) in center
+    node.append('text')
+      .text(d => {
+        const capType = d.capabilityTypes?.[0] || 'default';
+        return CAPABILITY_TYPES[capType]?.icon || CAPABILITY_TYPES.default.icon;
+      })
+      .attr('text-anchor', 'middle')
+      .attr('dy', '-0.1em')
+      .attr('font-size', '18px')
+      .attr('pointer-events', 'none');
+
+    // Node labels below
     node.append('text')
       .text(d => d.name)
       .attr('text-anchor', 'middle')
-      .attr('dy', '0.35em')
+      .attr('dy', '2.8em')
       .attr('fill', '#f3f4f6')
-      .attr('font-size', '12px')
+      .attr('font-size', '10px')
       .attr('font-weight', '600')
       .attr('pointer-events', 'none');
 
-    // Capability count badge
-    node.append('circle')
-      .attr('cx', 20)
-      .attr('cy', -20)
-      .attr('r', 12)
-      .attr('fill', '#8b5cf6')
+    // Trigger badge (orange, top-left) - PUSH
+    node.filter(d => d.triggers?.length > 0)
+      .append('circle')
+      .attr('cx', -22)
+      .attr('cy', -22)
+      .attr('r', 10)
+      .attr('fill', '#f97316')
       .attr('stroke', '#0a0e1a')
-      .attr('stroke-width', 2);
+      .attr('stroke-width', 2)
+      .attr('class', 'badge-trigger');
 
-    node.append('text')
-      .text(d => d.capabilities.length)
-      .attr('x', 20)
-      .attr('y', -20)
+    node.filter(d => d.triggers?.length > 0)
+      .append('text')
+      .text(d => d.triggers.length)
+      .attr('x', -22)
+      .attr('y', -22)
       .attr('text-anchor', 'middle')
       .attr('dy', '0.35em')
-      .attr('fill', '#f3f4f6')
-      .attr('font-size', '10px')
+      .attr('fill', '#fff')
+      .attr('font-size', '8px')
       .attr('font-weight', '700')
       .attr('pointer-events', 'none');
+
+    // Tool badge (blue, top-right) - PULL
+    node.filter(d => d.tools?.length > 0)
+      .append('circle')
+      .attr('cx', 22)
+      .attr('cy', -22)
+      .attr('r', 10)
+      .attr('fill', '#3b82f6')
+      .attr('stroke', '#0a0e1a')
+      .attr('stroke-width', 2)
+      .attr('class', 'badge-tool');
+
+    node.filter(d => d.tools?.length > 0)
+      .append('text')
+      .text(d => d.tools.length)
+      .attr('x', 22)
+      .attr('y', -22)
+      .attr('text-anchor', 'middle')
+      .attr('dy', '0.35em')
+      .attr('fill', '#fff')
+      .attr('font-size', '8px')
+      .attr('font-weight', '700')
+      .attr('pointer-events', 'none');
+
+    // Hover tooltip
+    const tooltip = d3.select('body').append('div')
+      .attr('class', 'mesh-tooltip')
+      .style('opacity', 0)
+      .style('position', 'absolute')
+      .style('background', 'var(--bg-secondary)')
+      .style('border', '1px solid var(--border-color)')
+      .style('border-radius', '8px')
+      .style('padding', '12px')
+      .style('pointer-events', 'none')
+      .style('z-index', 1000);
+
+    node.on('mouseover', (event, d) => {
+      const capType = d.capabilityTypes?.[0] || 'default';
+      const typeInfo = CAPABILITY_TYPES[capType] || CAPABILITY_TYPES.default;
+      
+      tooltip.transition().duration(200).style('opacity', 1);
+      tooltip.html(`
+        <div style="font-weight: 700; margin-bottom: 6px;">${d.name}</div>
+        <div style="font-size: 12px; color: ${typeInfo.color}; margin-bottom: 4px;">
+          ${typeInfo.icon} ${typeInfo.label}
+        </div>
+        <div style="font-size: 11px; color: #9ca3af;">
+          Status: <span style="color: ${STATUS_COLORS[d.status]}">${d.status}</span>
+        </div>
+        <div style="font-size: 11px; color: #f97316; margin-top: 4px;">
+          ↑ ${d.triggers?.length || 0} triggers
+        </div>
+        <div style="font-size: 11px; color: #3b82f6;">
+          ↓ ${d.tools?.length || 0} tools
+        </div>
+      `)
+        .style('left', (event.pageX + 10) + 'px')
+        .style('top', (event.pageY - 10) + 'px');
+    })
+    .on('mouseout', () => {
+      tooltip.transition().duration(500).style('opacity', 0);
+    });
 
     // Add gradients
     const defs = svg.append('defs');
@@ -176,6 +276,15 @@ export const MeshTopology = ({ wsData }) => {
       .attr('y2', '100%');
     gradientActive.append('stop').attr('offset', '0%').attr('stop-color', '#3b82f6');
     gradientActive.append('stop').attr('offset', '100%').attr('stop-color', '#8b5cf6');
+
+    const gradientBusy = defs.append('linearGradient')
+      .attr('id', 'gradient-busy')
+      .attr('x1', '0%')
+      .attr('y1', '0%')
+      .attr('x2', '100%')
+      .attr('y2', '100%');
+    gradientBusy.append('stop').attr('offset', '0%').attr('stop-color', '#f59e0b');
+    gradientBusy.append('stop').attr('offset', '100%').attr('stop-color', '#d97706');
 
     const gradientInactive = defs.append('linearGradient')
       .attr('id', 'gradient-inactive')
@@ -218,6 +327,7 @@ export const MeshTopology = ({ wsData }) => {
     // Cleanup
     return () => {
       simulation.stop();
+      d3.selectAll('.mesh-tooltip').remove();
     };
   }, [nodes, links]);
 
@@ -235,8 +345,16 @@ export const MeshTopology = ({ wsData }) => {
             <span>Active</span>
           </div>
           <div className="legend-item">
-            <div className="legend-badge"></div>
-            <span>Capabilities</span>
+            <div className="legend-circle busy"></div>
+            <span>Busy</span>
+          </div>
+          <div className="legend-item">
+            <div className="legend-badge trigger"></div>
+            <span>Triggers (↑)</span>
+          </div>
+          <div className="legend-item">
+            <div className="legend-badge tool"></div>
+            <span>Tools (↓)</span>
           </div>
         </div>
       </div>

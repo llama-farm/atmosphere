@@ -6,13 +6,18 @@ import pytest
 import asyncio
 import struct
 
+# Public API from mesh.network
 from atmosphere.mesh.network import (
     PublicEndpoint,
-    _build_stun_request,
-    _parse_stun_response,
     discover_public_ip,
     get_local_ip,
     gather_network_info,
+)
+
+# Internal STUN implementation details (for testing internals)
+from atmosphere.network.stun import (
+    _build_stun_request,
+    _parse_stun_response,
     STUN_MAGIC_COOKIE,
     STUN_BINDING_RESPONSE,
     ATTR_XOR_MAPPED_ADDRESS,

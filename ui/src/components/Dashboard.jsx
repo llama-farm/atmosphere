@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Activity, Wifi, Zap, Users } from 'lucide-react';
+import { Activity, Wifi, Zap, Users, ArrowUp, ArrowDown, Camera, Mic, Brain, Search, Wrench } from 'lucide-react';
 import './Dashboard.css';
 
 export const Dashboard = ({ wsData }) => {
@@ -8,6 +8,13 @@ export const Dashboard = ({ wsData }) => {
     totalCapabilities: 0,
     activeAgents: 0,
     meshHealth: 100,
+  });
+
+  const [capabilityStats, setCapabilityStats] = useState({
+    total: 0,
+    byType: {},
+    recentTriggers: [],
+    activeToolCalls: [],
   });
 
   const [recentActivity, setRecentActivity] = useState([]);
@@ -23,22 +30,81 @@ export const Dashboard = ({ wsData }) => {
           activeAgents: data.active_agents || 0,
           meshHealth: data.health || 100,
         });
+
+        // Process capability breakdown
+        if (data.capabilities) {
+          const byType = {};
+          data.capabilities.forEach(cap => {
+            const type = cap.type || 'other';
+            byType[type] = (byType[type] || 0) + 1;
+          });
+          setCapabilityStats(prev => ({
+            ...prev,
+            total: data.capabilities.length,
+            byType,
+          }));
+        }
       })
-      .catch(err => console.error('Failed to fetch mesh status:', err));
+      .catch(err => {
+        console.error('Failed to fetch mesh status:', err);
+        // Set demo capability stats
+        setCapabilityStats({
+          total: 12,
+          byType: {
+            'sensor/camera': 3,
+            'sensor/voice': 2,
+            'llm': 4,
+            'search': 2,
+            'tool': 1,
+          },
+          recentTriggers: [
+            { id: 1, name: 'motion_detected', capability: 'front-door', time: Date.now() - 5000 },
+            { id: 2, name: 'person_detected', capability: 'backyard-cam', time: Date.now() - 15000 },
+            { id: 3, name: 'wake_word', capability: 'alexa-kitchen', time: Date.now() - 30000 },
+            { id: 4, name: 'sound_detected', capability: 'baby-monitor', time: Date.now() - 45000 },
+            { id: 5, name: 'query_complete', capability: 'search-node', time: Date.now() - 60000 },
+          ],
+          activeToolCalls: [
+            { id: 1, tool: 'get_frame', capability: 'front-door', status: 'running' },
+            { id: 2, tool: 'generate', capability: 'llm-1', status: 'running' },
+          ],
+        });
+      });
   }, []);
 
   useEffect(() => {
     // Update activity from WebSocket
     if (wsData) {
-      setRecentActivity(prev => [
-        {
-          id: Date.now(),
-          type: wsData.type,
-          message: wsData.message || JSON.stringify(wsData),
-          timestamp: new Date().toLocaleTimeString(),
-        },
-        ...prev.slice(0, 9) // Keep last 10 items
-      ]);
+      const activity = {
+        id: Date.now(),
+        type: wsData.type,
+        message: wsData.message || JSON.stringify(wsData),
+        timestamp: new Date().toLocaleTimeString(),
+      };
+
+      setRecentActivity(prev => [activity, ...prev.slice(0, 9)]);
+
+      // Track trigger events
+      if (wsData.event_type === 'TRIGGER_EVENT') {
+        setCapabilityStats(prev => ({
+          ...prev,
+          recentTriggers: [
+            { id: Date.now(), name: wsData.trigger, capability: wsData.capability, time: Date.now() },
+            ...prev.recentTriggers.slice(0, 4)
+          ],
+        }));
+      }
+
+      // Track tool calls
+      if (wsData.event_type === 'TOOL_CALL') {
+        setCapabilityStats(prev => ({
+          ...prev,
+          activeToolCalls: [
+            { id: Date.now(), tool: wsData.tool, capability: wsData.capability, status: 'running' },
+            ...prev.activeToolCalls.filter(t => t.status === 'running').slice(0, 4)
+          ],
+        }));
+      }
     }
   }, [wsData]);
 
@@ -53,6 +119,21 @@ export const Dashboard = ({ wsData }) => {
       </div>
     </div>
   );
+
+  const TYPE_ICONS = {
+    'sensor/camera': { icon: Camera, color: '#10b981' },
+    'sensor/voice': { icon: Mic, color: '#f97316' },
+    'llm': { icon: Brain, color: '#8b5cf6' },
+    'search': { icon: Search, color: '#3b82f6' },
+    'tool': { icon: Wrench, color: '#6b7280' },
+  };
+
+  const formatTimeAgo = (timestamp) => {
+    const diff = Math.floor((Date.now() - timestamp) / 1000);
+    if (diff < 60) return `${diff}s ago`;
+    if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+    return `${Math.floor(diff / 3600)}h ago`;
+  };
 
   return (
     <div className="dashboard fade-in">
@@ -90,6 +171,80 @@ export const Dashboard = ({ wsData }) => {
           value={`${stats.meshHealth}%`}
           color="#f59e0b"
         />
+      </div>
+
+      {/* Capability Summary Panel */}
+      <div className="capability-summary-panel">
+        <h2>
+          <Zap size={20} />
+          Capabilities Overview
+        </h2>
+        
+        <div className="capability-grid">
+          {/* Total Capabilities */}
+          <div className="capability-total">
+            <div className="total-number">{capabilityStats.total}</div>
+            <div className="total-label">Total Capabilities</div>
+          </div>
+
+          {/* By Type Breakdown */}
+          <div className="capability-types">
+            <h3>By Type</h3>
+            <div className="type-list">
+              {Object.entries(capabilityStats.byType).map(([type, count]) => {
+                const typeInfo = TYPE_ICONS[type] || { icon: Zap, color: '#8b5cf6' };
+                const TypeIcon = typeInfo.icon;
+                return (
+                  <div key={type} className="type-item">
+                    <TypeIcon size={16} color={typeInfo.color} />
+                    <span className="type-name">{type}</span>
+                    <span className="type-count">{count}</span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Recent Triggers */}
+          <div className="recent-triggers">
+            <h3>
+              <ArrowUp size={14} color="#f97316" />
+              Recent Triggers
+            </h3>
+            <div className="trigger-list">
+              {capabilityStats.recentTriggers.slice(0, 5).map(trigger => (
+                <div key={trigger.id} className="trigger-item">
+                  <span className="trigger-name">{trigger.name}</span>
+                  <span className="trigger-capability">{trigger.capability}</span>
+                  <span className="trigger-time">{formatTimeAgo(trigger.time)}</span>
+                </div>
+              ))}
+              {capabilityStats.recentTriggers.length === 0 && (
+                <div className="no-data">No recent triggers</div>
+              )}
+            </div>
+          </div>
+
+          {/* Active Tool Calls */}
+          <div className="active-tools">
+            <h3>
+              <ArrowDown size={14} color="#3b82f6" />
+              Active Tool Calls
+            </h3>
+            <div className="tool-list">
+              {capabilityStats.activeToolCalls.map(tool => (
+                <div key={tool.id} className="tool-item">
+                  <span className={`tool-status ${tool.status}`}></span>
+                  <span className="tool-name">{tool.tool}</span>
+                  <span className="tool-capability">{tool.capability}</span>
+                </div>
+              ))}
+              {capabilityStats.activeToolCalls.length === 0 && (
+                <div className="no-data">No active tool calls</div>
+              )}
+            </div>
+          </div>
+        </div>
       </div>
 
       <div className="activity-panel">

@@ -56,9 +56,14 @@
   border-color: #3b82f6;
 }
 
+.legend-circle.busy {
+  background: linear-gradient(135deg, #f59e0b, #d97706);
+  border-color: #f59e0b;
+}
+
 .legend-badge {
-  width: 20px;
-  height: 20px;
+  width: 18px;
+  height: 18px;
   border-radius: 50%;
   background: #8b5cf6;
   border: 2px solid var(--bg-primary);
@@ -68,6 +73,26 @@
   font-size: 10px;
   font-weight: 700;
   color: var(--text-primary);
+}
+
+.legend-badge.trigger {
+  background: #f97316;
+}
+
+.legend-badge.tool {
+  background: #3b82f6;
+}
+
+/* Tooltip styles */
+.mesh-tooltip {
+  background: #1f2937;
+  border: 1px solid #374151;
+  border-radius: 8px;
+  padding: 12px;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
+  min-width: 150px;
+  color: #f3f4f6;
+  font-size: 13px;
 }
 
 .topology-canvas {

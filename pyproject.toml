@@ -3,27 +3,28 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "atmosphere"
+name = "atmosphere-mesh"
 version = "1.0.0"
-description = "Semantic mesh routing for AI capabilities"
+description = "Semantic mesh routing for AI capabilities - The Internet of Intent"
 readme = "README.md"
-license = {text = "MIT"}
+license = "Apache-2.0"
 requires-python = ">=3.10"
 authors = [
     {name = "Rownd AI", email = "hello@rownd.ai"}
 ]
-keywords = ["ai", "mesh", "routing", "llm", "distributed"]
+keywords = ["ai", "mesh", "routing", "llm", "distributed", "intent", "semantic", "ollama"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Topic :: System :: Distributed Computing",
+    "Framework :: FastAPI",
 ]
 
 dependencies = [
@@ -37,25 +38,53 @@ dependencies = [
     "zeroconf>=0.131.0",
     "pydantic>=2.0.0",
     "psutil>=5.9.0",
+    "httpx>=0.26.0",
+    "PyYAML>=6.0",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0.0",
     "pytest-asyncio>=0.23.0",
-    "httpx>=0.26.0",
+    "build",
+    "twine",
+    "mypy>=1.8.0",
+    "ruff>=0.1.0",
+]
+ml = [
+    "torch>=2.0.0",
+    "transformers>=4.35.0",
+    "sentence-transformers>=2.2.0",
+]
+vision = [
+    "pillow>=10.0.0",
+    "opencv-python>=4.8.0",
+]
+full = [
+    "atmosphere-mesh[ml,vision]",
 ]
 
 [project.scripts]
 atmosphere = "atmosphere.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/rowndai/atmosphere"
-Documentation = "https://github.com/rowndai/atmosphere#readme"
-Repository = "https://github.com/rowndai/atmosphere"
+Homepage = "https://github.com/llama-farm/atmosphere"
+Documentation = "https://atmosphere.llama.farm"
+Repository = "https://github.com/llama-farm/atmosphere"
+Changelog = "https://github.com/llama-farm/atmosphere/blob/main/CHANGELOG.md"
+Issues = "https://github.com/llama-farm/atmosphere/issues"
+
+[tool.setuptools]
+include-package-data = true
 
 [tool.setuptools.packages.find]
 include = ["atmosphere*"]
+
+[tool.setuptools.package-data]
+atmosphere = [
+    "ui/dist/**/*",
+    "py.typed",
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

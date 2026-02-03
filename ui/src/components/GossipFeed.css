@@ -162,6 +162,133 @@
   font-weight: 600;
 }
 
+.message-type-badge {
+  padding: 0.2rem 0.5rem;
+  border-radius: 0.25rem;
+  font-size: 0.65rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.message-type-badge.type-capability-available {
+  background: rgba(16, 185, 129, 0.2);
+  color: #10b981;
+}
+
+.message-type-badge.type-capability-heartbeat {
+  background: rgba(107, 114, 128, 0.2);
+  color: #9ca3af;
+}
+
+.message-type-badge.type-trigger-event {
+  background: rgba(249, 115, 22, 0.2);
+  color: #f97316;
+}
+
+.message-type-badge.type-tool-call {
+  background: rgba(59, 130, 246, 0.2);
+  color: #3b82f6;
+}
+
+.message-type-badge.type-capability {
+  background: rgba(139, 92, 246, 0.2);
+  color: #8b5cf6;
+}
+
+.message-type-badge.type-node {
+  background: rgba(16, 185, 129, 0.2);
+  color: #10b981;
+}
+
+.message-type-badge.type-error {
+  background: rgba(239, 68, 68, 0.2);
+  color: #ef4444;
+}
+
+.message-trigger {
+  background: rgba(249, 115, 22, 0.15);
+  color: #fb923c;
+  padding: 0.2rem 0.5rem;
+  border-radius: 0.25rem;
+  font-size: 0.7rem;
+  font-family: 'SF Mono', monospace;
+  border: 1px solid rgba(249, 115, 22, 0.3);
+}
+
+.message-tool {
+  background: rgba(59, 130, 246, 0.15);
+  color: #60a5fa;
+  padding: 0.2rem 0.5rem;
+  border-radius: 0.25rem;
+  font-size: 0.7rem;
+  font-family: 'SF Mono', monospace;
+  border: 1px solid rgba(59, 130, 246, 0.3);
+}
+
+/* Animated message styles */
+.feed-message.animated-message {
+  border-left: 3px solid #f97316;
+  animation: triggerPulse 2s ease-in-out;
+}
+
+.pulse-icon {
+  animation: iconPulse 1.5s ease-in-out infinite;
+}
+
+@keyframes triggerPulse {
+  0%, 100% {
+    background: var(--bg-tertiary);
+  }
+  50% {
+    background: rgba(249, 115, 22, 0.1);
+  }
+}
+
+@keyframes iconPulse {
+  0%, 100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: scale(1.1);
+    opacity: 0.8;
+  }
+}
+
+/* Filter button colors */
+.filter-button.filter-triggers.active {
+  background: #f97316;
+  border-color: #f97316;
+}
+
+.filter-button.filter-tools.active {
+  background: #3b82f6;
+  border-color: #3b82f6;
+}
+
+.filter-button.filter-errors.active {
+  background: #ef4444;
+  border-color: #ef4444;
+}
+
+/* Message type-specific left borders */
+.feed-message.type-trigger-event {
+  border-left: 3px solid #f97316;
+}
+
+.feed-message.type-tool-call {
+  border-left: 3px solid #3b82f6;
+}
+
+.feed-message.type-capability-available {
+  border-left: 3px solid #10b981;
+}
+
+.feed-message.type-capability-heartbeat {
+  border-left: 3px solid #6b7280;
+}
+
 .message-time {
   margin-left: auto;
   color: var(--text-tertiary);

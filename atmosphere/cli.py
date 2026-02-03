@@ -1019,6 +1019,18 @@ def tool_run(tool_name: str, params: str, param: tuple):
 # Add model commands
 main.add_command(model_commands)
 
+# Add scanner command
+from .scanner.cli import scan
+main.add_command(scan)
+
+# Add approval command
+from .approval.cli import approve
+main.add_command(approve)
+
+# Add cost command
+from .cost.cli import cost
+main.add_command(cost)
+
 
 if __name__ == '__main__':
     main()
