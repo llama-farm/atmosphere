@@ -667,12 +667,14 @@ async def generate_invite_token():
     """
     Generate an invite token for others to join the mesh.
     
+    Uses DYNAMIC IP detection - always reflects current network state.
+    
     Includes multiple endpoints for connectivity:
-    - local: For same-network connections (fastest)
-    - public: For internet connections (requires port forwarding)
+    - local: For same-network connections (fastest) - uses detected IPs
     - relay: For fallback when direct connection fails
     
     Token is cryptographically signed by the mesh founder.
+    Fresh token generated on each call (no replay issues).
     """
     server = get_server()
     if not server or not server.node:
@@ -680,7 +682,7 @@ async def generate_invite_token():
     
     import json
     import urllib.parse
-    from ..network import gather_network_info
+    from ..network.ip_detect import get_best_local_ip, get_all_local_ips
     from ..auth.tokens import MeshToken
     
     # Get mesh info
@@ -695,7 +697,7 @@ async def generate_invite_token():
     
     node_id = server.node.node_id if server.node else "unknown"
     
-    # Create a properly signed token
+    # Create a properly signed token - FRESH on each call
     mesh_token = MeshToken.create(
         mesh_id=mesh.mesh_id,
         issuer_keypair=mesh_keypair,
@@ -711,37 +713,27 @@ async def generate_invite_token():
     # Also generate a short display code for easy reference
     token_display = f"ATM-{mesh_token.nonce[:8].upper()}"
     
-    # Gather network info (local IP + STUN discovery for public IP)
-    port = 11451  # Default Atmosphere port
-    try:
-        network_info = await gather_network_info(port)
-        local_ip = network_info.local_ip
-        public_endpoint = network_info.public_endpoint
-    except Exception as e:
-        logger.warning(f"Network discovery failed: {e}")
-        # Fallback to basic local IP
-        import socket
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.connect(("8.8.8.8", 80))
-            local_ip = s.getsockname()[0]
-            s.close()
-        except:
-            local_ip = "127.0.0.1"
-        public_endpoint = None
+    # DYNAMIC IP detection - always current
+    port = server.config.server.port if server.config else 11451
+    local_ip = get_best_local_ip()
+    all_local_ips = get_all_local_ips()
+    
+    if not local_ip:
+        local_ip = "127.0.0.1"
+        logger.warning("No local IP detected, using localhost")
     
     mesh = server.node.mesh if server.node else None
     
-    # Build multi-path endpoints
+    # Build multi-path endpoints with ALL detected IPs
     endpoints = {
         "local": f"ws://{local_ip}:{port}",
     }
     
-    # Add public endpoint if discovered via STUN
-    if public_endpoint and public_endpoint.is_public:
-        endpoints["public"] = f"ws://{public_endpoint.ip}:{port}"
+    # Include alternate local IPs for multi-homed devices
+    if len(all_local_ips) > 1:
+        endpoints["local_alt"] = [f"ws://{ip}:{port}" for ip in all_local_ips if ip != local_ip]
     
-    # Add relay endpoints if configured (config takes precedence over env var)
+    # Add relay endpoint (primary for NAT traversal)
     import os
     relay_url = None
     if server.config and server.config.relay_url:
@@ -766,12 +758,8 @@ async def generate_invite_token():
     
     # Get capabilities this mesh offers
     capabilities = []
-    if server.node:
-        try:
-            caps = server.node.capabilities.list() if hasattr(server.node, 'capabilities') else []
-            capabilities = [c.name if hasattr(c, 'name') else str(c) for c in caps[:10]]  # Limit for QR size
-        except:
-            capabilities = []
+    if server.router:
+        capabilities = list(server.router.local_capabilities.keys())[:10]  # Limit for QR size
     
     # Get mesh public key for verification
     mesh_public_key = mesh_keypair.public_key_b64()
@@ -793,8 +781,7 @@ async def generate_invite_token():
         "c": capabilities,
         "n": {
             "l": local_ip,
-            "p": public_endpoint.ip if public_endpoint else None,
-            "n": public_endpoint.ip != local_ip if public_endpoint else True,
+            "a": all_local_ips,  # All detected IPs
         },
         "ex": expires_at,
         "cr": int(time.time()),
@@ -813,8 +800,8 @@ async def generate_invite_token():
     token_json = urllib.parse.quote(json.dumps(token_dict))
     qr_data_legacy = f"atmosphere://join?token={token_json}&mesh={mesh_name}&endpoints={endpoints_json}"
     
-    # Primary endpoint for legacy compatibility
-    primary_endpoint = endpoints.get("public") or endpoints.get("local", f"ws://{local_ip}:{port}")
+    # Primary endpoint - prefer relay for reliability, local for speed
+    primary_endpoint = endpoints.get("relay") or endpoints.get("local", f"ws://{local_ip}:{port}")
     
     return {
         # Full invite object
@@ -829,9 +816,7 @@ async def generate_invite_token():
         "capabilities": capabilities,
         "network_info": {
             "local_ip": local_ip,
-            "public_ip": public_endpoint.ip if public_endpoint else None,
-            "is_behind_nat": public_endpoint.ip != local_ip if public_endpoint else True,
-            "stun_source": public_endpoint.source if public_endpoint else None,
+            "all_local_ips": all_local_ips,
         },
         # Legacy single endpoint for backwards compatibility
         "endpoint": primary_endpoint,
@@ -2058,3 +2043,129 @@ async def remove_device(device_id: str):
     
     registry.remove_device(device_id)
     return {"status": "removed", "device_id": device_id}
+
+
+# ============================================================================
+# Network Status API - Dynamic IP & Endpoint Discovery
+# ============================================================================
+
+@router.get("/network")
+async def get_network_status():
+    """
+    Get current network status with dynamic IP detection.
+    
+    Returns:
+    - All detected local IPs (for multi-homed devices)
+    - Best IP for mesh communication
+    - Relay status and URL
+    - Endpoint registry status (peer IPs from gossip)
+    
+    This endpoint powers the dynamic endpoint propagation system
+    where devices automatically share their IPs via gossip.
+    """
+    from ..network.ip_detect import get_local_ips, get_best_local_ip, get_all_local_ips
+    
+    server = get_server()
+    
+    # Get detected IPs
+    all_interfaces = get_local_ips()
+    best_ip = get_best_local_ip()
+    all_ips = get_all_local_ips()
+    
+    # Get relay status
+    relay_connected = False
+    relay_url = None
+    if server and server.relay_client:
+        relay_connected = server.relay_client.ws is not None and not server.relay_client.ws.closed
+        relay_url = getattr(server.config, 'relay_url', None)
+    
+    # Get endpoint registry status (if gossip is using it)
+    endpoint_registry_status = None
+    if server and server.gossip:
+        registry = getattr(server.gossip, 'endpoint_registry', None)
+        if registry:
+            endpoint_registry_status = {
+                "my_ips": registry._my_ips,
+                "known_peers": len(registry.get_all_peers()),
+                "peers": [{
+                    "node_id": p.node_id,
+                    "local_ips": p.local_ips,
+                    "port": p.local_port,
+                    "relay_url": p.relay_url,
+                    "last_updated": p.last_updated
+                } for p in registry.get_all_peers()]
+            }
+    
+    # Get gossip stats
+    gossip_stats = None
+    if server and server.gossip:
+        gossip_stats = server.gossip.stats()
+    
+    return {
+        "node_id": server.node.node_id if server and server.node else None,
+        "detection": {
+            "best_ip": best_ip,
+            "all_ips": all_ips,
+            "interfaces": [{
+                "name": iface.name,
+                "ip": iface.ip,
+                "priority": iface.priority,
+                "is_private": iface.is_private
+            } for iface in all_interfaces]
+        },
+        "relay": {
+            "connected": relay_connected,
+            "url": relay_url
+        },
+        "endpoint_registry": endpoint_registry_status,
+        "gossip": gossip_stats,
+        "mesh": {
+            "id": server.node.mesh.mesh_id if server and server.node and server.node.mesh else None,
+            "name": server.node.mesh.name if server and server.node and server.node.mesh else None
+        },
+        "timestamp": time.time()
+    }
+
+
+@router.post("/network/refresh")
+async def refresh_network():
+    """
+    Force refresh of IP detection.
+    
+    Useful when network changes and you want immediate update
+    rather than waiting for the next gossip cycle.
+    """
+    from ..network.ip_detect import get_local_ips, get_best_local_ip, get_all_local_ips
+    
+    server = get_server()
+    
+    # Get fresh IPs
+    all_ips = get_all_local_ips()
+    best_ip = get_best_local_ip()
+    
+    # Force gossip endpoint registry refresh if available
+    if server and server.gossip:
+        registry = getattr(server.gossip, 'endpoint_registry', None)
+        if registry:
+            changed = registry.refresh_my_ips()
+            if changed:
+                # Trigger immediate gossip announcement with new IPs
+                try:
+                    await server.gossip.announce()
+                except Exception as e:
+                    logger.error(f"Failed to announce after IP refresh: {e}")
+            return {
+                "success": True,
+                "ips_changed": changed,
+                "best_ip": best_ip,
+                "all_ips": all_ips,
+                "timestamp": time.time()
+            }
+    
+    return {
+        "success": True,
+        "ips_changed": False,
+        "best_ip": best_ip,
+        "all_ips": all_ips,
+        "timestamp": time.time()
+    }

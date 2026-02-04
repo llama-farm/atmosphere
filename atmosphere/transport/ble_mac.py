@@ -40,13 +40,19 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 # ============================================================================
-# UUIDs (Must match Android implementation)
+# UUIDs (MUST match Android implementation exactly!)
 # ============================================================================
 
-MESH_SERVICE_UUID = "A7M0MESH-0001-0000-0000-000000000001"
-TX_CHAR_UUID = "A7M0MESH-0001-0001-0000-000000000001"
-RX_CHAR_UUID = "A7M0MESH-0001-0002-0000-000000000001"
-INFO_CHAR_UUID = "A7M0MESH-0001-0003-0000-000000000001"
+# These UUIDs are aligned with Android's BleTransport.kt
+MESH_SERVICE_UUID = "A7A05F30-0001-4000-8000-00805F9B34FB"
+TX_CHAR_UUID = "A7A05F30-0002-4000-8000-00805F9B34FB"
+RX_CHAR_UUID = "A7A05F30-0003-4000-8000-00805F9B34FB"
+INFO_CHAR_UUID = "A7A05F30-0004-4000-8000-00805F9B34FB"
+MESH_ID_CHAR_UUID = "A7A05F30-0005-4000-8000-00805F9B34FB"
+CCCD_UUID = "00002902-0000-1000-8000-00805F9B34FB"
+
+# Manufacturer ID for service data (Atmosphere = 0xA7F0)
+ATMOSPHERE_MANUFACTURER_ID = 0xA7F0
 
 # Default configuration
 DEFAULT_TTL = 5
@@ -320,17 +326,102 @@ class MessageFragmenter:
 
 
 # ============================================================================
+# Link Quality Metrics
+# ============================================================================
+
+@dataclass
+class LinkMetrics:
+    """Track link quality for smarter routing decisions."""
+    rssi_samples: List[int] = field(default_factory=list)
+    packets_sent: int = 0
+    packets_acked: int = 0
+    last_heartbeat: float = 0
+    hop_count: int = 1  # Hops to reach this peer
+    
+    MAX_SAMPLES = 10
+    
+    def add_rssi(self, rssi: int):
+        """Add RSSI sample (keep last N)."""
+        self.rssi_samples.append(rssi)
+        if len(self.rssi_samples) > self.MAX_SAMPLES:
+            self.rssi_samples.pop(0)
+    
+    @property
+    def rssi_avg(self) -> float:
+        """Average RSSI."""
+        if not self.rssi_samples:
+            return -100.0
+        return sum(self.rssi_samples) / len(self.rssi_samples)
+    
+    @property
+    def delivery_ratio(self) -> float:
+        """Packet delivery ratio (0-1)."""
+        if self.packets_sent == 0:
+            return 1.0
+        return self.packets_acked / self.packets_sent
+    
+    @property
+    def link_cost(self) -> float:
+        """Link cost for routing (lower is better)."""
+        # Normalize RSSI to 0-1 (assuming -100 to -40 dBm range)
+        rssi_factor = max(0, min(1, (self.rssi_avg + 100) / 60))
+        reliability = self.delivery_ratio
+        # Cost = 1 / quality, with hop count factor
+        quality = rssi_factor * reliability + 0.01
+        return self.hop_count / quality
+
+
+@dataclass  
+class MeshMetrics:
+    """Global mesh metrics for monitoring."""
+    messages_sent: int = 0
+    messages_received: int = 0
+    messages_relayed: int = 0
+    messages_dropped_ttl: int = 0
+    messages_deduplicated: int = 0
+    heartbeats_sent: int = 0
+    heartbeats_received: int = 0
+    
+    def to_dict(self) -> dict:
+        return {
+            "sent": self.messages_sent,
+            "received": self.messages_received,
+            "relayed": self.messages_relayed,
+            "dropped_ttl": self.messages_dropped_ttl,
+            "deduplicated": self.messages_deduplicated,
+            "heartbeats_sent": self.heartbeats_sent,
+            "heartbeats_received": self.heartbeats_received
+        }
+
+
+# ============================================================================
 # Mesh Router
 # ============================================================================
 
 class MeshRouter:
-    """Handles mesh routing with flood-based forwarding."""
+    """
+    Handles mesh routing with flood-based forwarding.
+    
+    Features:
+    - TTL-based flooding with loop prevention
+    - Link quality tracking (RSSI, delivery ratio)
+    - Heartbeat support for topology awareness
+    - Message deduplication via LRU cache
+    """
     
     def __init__(self):
         self.seen_messages = LRUCache(SEEN_MESSAGE_CACHE_SIZE)
         self.peers: Dict[str, NodeInfo] = {}
+        self.link_metrics: Dict[str, LinkMetrics] = {}
         self.message_handlers: List[Callable[[BleMessage], None]] = []
         self.node_id = str(uuid.uuid4())[:8]  # Short local ID
+        self.metrics = MeshMetrics()
+        self._seq_counter = 0
+    
+    def next_seq(self) -> int:
+        """Get next sequence number."""
+        self._seq_counter = (self._seq_counter + 1) & 0xFFFF
+        return self._seq_counter
     
     def add_handler(self, handler: Callable[[BleMessage], None]):
         """Add message handler callback."""
@@ -340,30 +431,69 @@ class MeshRouter:
         """Check if message should be processed (loop prevention)."""
         msg_id = (source_id, seq)
         if msg_id in self.seen_messages:
+            self.metrics.messages_deduplicated += 1
             return False
         self.seen_messages.add(msg_id)
         return True
     
     def update_peer(self, peer_id: str, rssi: int = 0, info: Optional[NodeInfo] = None):
-        """Update peer information."""
+        """Update peer information and link metrics."""
+        now = time.time()
+        
+        # Update NodeInfo
         if info:
+            info.last_seen = now
+            info.rssi = rssi
             self.peers[peer_id] = info
         elif peer_id in self.peers:
-            self.peers[peer_id].last_seen = time.time()
+            self.peers[peer_id].last_seen = now
             self.peers[peer_id].rssi = rssi
         else:
             self.peers[peer_id] = NodeInfo(
                 node_id=peer_id,
                 rssi=rssi,
-                last_seen=time.time()
+                last_seen=now
             )
+        
+        # Update link metrics
+        if peer_id not in self.link_metrics:
+            self.link_metrics[peer_id] = LinkMetrics()
+        self.link_metrics[peer_id].add_rssi(rssi)
+    
+    def record_packet_sent(self, peer_id: str):
+        """Record packet sent to peer."""
+        if peer_id not in self.link_metrics:
+            self.link_metrics[peer_id] = LinkMetrics()
+        self.link_metrics[peer_id].packets_sent += 1
+    
+    def record_packet_ack(self, peer_id: str):
+        """Record packet acknowledgment from peer."""
+        if peer_id in self.link_metrics:
+            self.link_metrics[peer_id].packets_acked += 1
+    
+    def get_link_cost(self, peer_id: str) -> float:
+        """Get link cost to peer (lower is better)."""
+        if peer_id in self.link_metrics:
+            return self.link_metrics[peer_id].link_cost
+        return float('inf')
+    
+    def get_best_peers(self, limit: int = 5) -> List[str]:
+        """Get peers sorted by link quality (best first)."""
+        peers_with_cost = [
+            (peer_id, self.get_link_cost(peer_id))
+            for peer_id in self.peers.keys()
+        ]
+        peers_with_cost.sort(key=lambda x: x[1])
+        return [p[0] for p in peers_with_cost[:limit]]
     
     def remove_peer(self, peer_id: str):
         """Remove peer from registry."""
         self.peers.pop(peer_id, None)
+        self.link_metrics.pop(peer_id, None)
     
     def deliver_message(self, message: BleMessage):
         """Deliver message to local handlers."""
+        self.metrics.messages_received += 1
         for handler in self.message_handlers:
             try:
                 handler(message)
@@ -374,6 +504,7 @@ class MeshRouter:
         """Decrement TTL in message, return None if expired."""
         header = MessageHeader.unpack(data)
         if header.ttl <= 1:
+            self.metrics.messages_dropped_ttl += 1
             return None
         
         new_header = MessageHeader(
@@ -386,7 +517,50 @@ class MeshRouter:
             frag_total=header.frag_total
         )
         
+        self.metrics.messages_relayed += 1
         return new_header.pack() + data[8:]
+    
+    def create_heartbeat(self) -> bytes:
+        """Create heartbeat message."""
+        payload = {
+            "id": self.node_id,
+            "ts": int(time.time()),
+            "peers": len(self.peers),
+            "metrics": self.metrics.to_dict()
+        }
+        if CBOR_AVAILABLE:
+            payload_bytes = cbor2.dumps(payload)
+        else:
+            payload_bytes = json.dumps(payload).encode('utf-8')
+        
+        header = MessageHeader(
+            msg_type=MessageType.HELLO,
+            ttl=DEFAULT_TTL,
+            seq=self.next_seq()
+        )
+        self.metrics.heartbeats_sent += 1
+        return header.pack() + payload_bytes
+    
+    def handle_heartbeat(self, source_id: str, payload: bytes, ttl_remaining: int):
+        """Process incoming heartbeat."""
+        try:
+            if CBOR_AVAILABLE:
+                data = cbor2.loads(payload)
+            else:
+                data = json.loads(payload.decode('utf-8'))
+            
+            # Calculate hop count from TTL
+            hops = DEFAULT_TTL - ttl_remaining
+            
+            if source_id in self.link_metrics:
+                self.link_metrics[source_id].hop_count = hops
+                self.link_metrics[source_id].last_heartbeat = time.time()
+            
+            self.metrics.heartbeats_received += 1
+            logger.debug(f"Heartbeat from {source_id}: {hops} hops, {data.get('peers', 0)} peers")
+            
+        except Exception as e:
+            logger.warning(f"Failed to parse heartbeat: {e}")
 
 
 # ============================================================================
@@ -431,6 +605,8 @@ class BleTransport:
         self._running = False
         self._scan_task: Optional[asyncio.Task] = None
         self._server_task: Optional[asyncio.Task] = None
+        self._heartbeat_task: Optional[asyncio.Task] = None
+        self._heartbeat_interval = 30.0  # seconds
         
         # Local info for INFO characteristic
         self._node_info = {
@@ -471,25 +647,22 @@ class BleTransport:
             self._server_task = asyncio.create_task(self._run_gatt_server())
         else:
             logger.warning("bless not available - GATT server disabled. Install with: pip install bless")
+        
+        # Start heartbeat loop
+        self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
     
     async def stop(self):
         """Stop BLE transport."""
         self._running = False
         
         # Cancel tasks
-        if self._scan_task:
-            self._scan_task.cancel()
-            try:
-                await self._scan_task
-            except asyncio.CancelledError:
-                pass
-        
-        if self._server_task:
-            self._server_task.cancel()
-            try:
-                await self._server_task
-            except asyncio.CancelledError:
-                pass
+        for task in [self._scan_task, self._server_task, self._heartbeat_task]:
+            if task:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
         
         # Disconnect all clients
         for address, client in list(self.connected_clients.items()):
@@ -536,6 +709,24 @@ class BleTransport:
                 logger.error(f"Scan error: {e}")
             
             await asyncio.sleep(2.0)
+    
+    async def _heartbeat_loop(self):
+        """Periodically send heartbeat messages."""
+        logger.info(f"Starting heartbeat loop (interval: {self._heartbeat_interval}s)")
+        
+        while self._running:
+            try:
+                await asyncio.sleep(self._heartbeat_interval)
+                
+                if self.connected_clients:
+                    heartbeat = self.router.create_heartbeat()
+                    await self.broadcast(heartbeat)
+                    logger.debug(f"Sent heartbeat to {len(self.connected_clients)} peers")
+                    
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Heartbeat error: {e}")
     
     async def _handle_discovered_device(self, device, adv_data):
         """Handle discovered Atmosphere device."""
@@ -781,6 +972,10 @@ class BleTransport:
             payload = json.dumps(data).encode('utf-8')
         return await self.send(payload, msg_type, ttl)
     
+    async def broadcast(self, data: bytes) -> bool:
+        """Broadcast raw message to all connected peers."""
+        return await self.send(data, target=None)
+    
     async def broadcast_hello(self):
         """Broadcast a HELLO message to discover peers."""
         hello_data = {
@@ -806,6 +1001,34 @@ class BleTransport:
     def is_running(self) -> bool:
         """Check if transport is running."""
         return self._running
+    
+    def get_metrics(self) -> dict:
+        """Get mesh metrics for monitoring."""
+        return {
+            "node_id": self.node_id,
+            "node_name": self.node_name,
+            "running": self._running,
+            "connected_peers": len(self.connected_clients),
+            "known_peers": len(self.router.peers),
+            "mesh_metrics": self.router.metrics.to_dict(),
+            "link_metrics": {
+                peer_id: {
+                    "rssi_avg": m.rssi_avg,
+                    "delivery_ratio": m.delivery_ratio,
+                    "hop_count": m.hop_count,
+                    "link_cost": m.link_cost
+                }
+                for peer_id, m in self.router.link_metrics.items()
+            }
+        }
+    
+    def get_best_route(self, destination: str) -> Optional[str]:
+        """Get best next-hop for destination (if known)."""
+        # Currently simple: direct if connected, else best link quality peer
+        if destination in self.connected_clients:
+            return destination
+        best_peers = self.router.get_best_peers(limit=1)
+        return best_peers[0] if best_peers else None
 
 
 # ============================================================================

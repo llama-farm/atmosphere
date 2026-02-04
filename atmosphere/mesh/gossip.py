@@ -3,6 +3,7 @@ Gossip protocol for capability propagation.
 
 Nodes periodically announce their capabilities to neighbors.
 Announcements propagate through the mesh with TTL decrement.
+Includes dynamic endpoint discovery for multi-homed nodes.
 """
 
 import asyncio
@@ -16,6 +17,7 @@ import logging
 import numpy as np
 
 from ..router.gradient import GradientTable, GradientEntry
+from ..network.ip_detect import EndpointRegistry, EndpointInfo, get_best_local_ip, get_all_local_ips
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +105,7 @@ class Announcement:
     from_node: str = ""
     capabilities: List[CapabilityInfo] = field(default_factory=list)
     resources: Optional[ResourceInfo] = None
+    endpoints: Optional[EndpointInfo] = None  # Dynamic endpoint info
     timestamp: float = field(default_factory=time.time)
     ttl: int = MAX_TTL
     nonce: str = field(default_factory=lambda: uuid.uuid4().hex[:16])
@@ -113,6 +116,7 @@ class Announcement:
             "from": self.from_node,
             "capabilities": [c.to_dict() for c in self.capabilities],
             "resources": self.resources.to_dict() if self.resources else None,
+            "endpoints": self.endpoints.to_dict() if self.endpoints else None,
             "timestamp": self.timestamp,
             "ttl": self.ttl,
             "nonce": self.nonce
@@ -127,6 +131,7 @@ class Announcement:
                 CapabilityInfo.from_dict(c) for c in data.get("capabilities", [])
             ],
             resources=ResourceInfo.from_dict(data["resources"]) if data.get("resources") else None,
+            endpoints=EndpointInfo.from_dict(data["endpoints"]) if data.get("endpoints") else None,
             timestamp=data.get("timestamp", time.time()),
             ttl=data.get("ttl", MAX_TTL),
             nonce=data.get("nonce", "")
@@ -149,7 +154,8 @@ class GossipProtocol:
     Gossip protocol for capability propagation.
     
     Periodically announces capabilities to peers. Processes incoming
-    announcements and updates gradient table.
+    announcements and updates gradient table. Propagates dynamic
+    endpoint information for multi-homed networking.
     """
 
     def __init__(
@@ -157,12 +163,14 @@ class GossipProtocol:
         node_id: str,
         gradient_table: GradientTable,
         local_capabilities: List[CapabilityInfo],
-        announce_interval: float = ANNOUNCE_INTERVAL_SEC
+        announce_interval: float = ANNOUNCE_INTERVAL_SEC,
+        endpoint_registry: Optional[EndpointRegistry] = None
     ):
         self.node_id = node_id
         self.gradient_table = gradient_table
         self.local_capabilities = local_capabilities
         self.announce_interval = announce_interval
+        self.endpoint_registry = endpoint_registry
 
         self._broadcast_callback: Optional[BroadcastCallback] = None
         self._running = False
@@ -175,6 +183,7 @@ class GossipProtocol:
         self._announcements_sent = 0
         self._announcements_received = 0
         self._announcements_forwarded = 0
+        self._endpoint_updates = 0
 
     def set_broadcast_callback(self, callback: BroadcastCallback) -> None:
         """Set the callback for broadcasting messages to peers."""
@@ -199,7 +208,7 @@ class GossipProtocol:
             return ResourceInfo()
 
     def build_announcement(self) -> Announcement:
-        """Build an announcement message."""
+        """Build an announcement message with capabilities and endpoints."""
         capabilities = []
 
         for cap in self.local_capabilities[:MAX_CAPABILITIES_PER_ANNOUNCE]:
@@ -228,10 +237,17 @@ class GossipProtocol:
                 estimated_latency_ms=entry.estimated_latency_ms
             ))
 
+        # Get current endpoint info (with refreshed IPs)
+        endpoint_info = None
+        if self.endpoint_registry:
+            self.endpoint_registry.refresh_my_ips()
+            endpoint_info = self.endpoint_registry.get_my_endpoint_info()
+
         return Announcement(
             from_node=self.node_id,
             capabilities=capabilities,
             resources=self.get_resource_info(),
+            endpoints=endpoint_info,
             ttl=MAX_TTL
         )
 
@@ -267,6 +283,12 @@ class GossipProtocol:
 
         self._announcements_received += 1
         self._known_nodes[announcement.from_node] = time.time()
+
+        # Update endpoint registry with peer's current IPs
+        if announcement.endpoints and self.endpoint_registry:
+            if self.endpoint_registry.update_peer(announcement.endpoints):
+                self._endpoint_updates += 1
+                logger.info(f"Updated endpoints for {announcement.from_node}: {announcement.endpoints.local_ips}")
 
         updates = 0
         for cap in announcement.capabilities:
@@ -364,10 +386,23 @@ class GossipProtocol:
 
     def stats(self) -> dict:
         """Get gossip protocol statistics."""
-        return {
+        stats = {
             "announcements_sent": self._announcements_sent,
             "announcements_received": self._announcements_received,
             "announcements_forwarded": self._announcements_forwarded,
+            "endpoint_updates": self._endpoint_updates,
             "known_nodes": len(self.known_nodes()),
             "gradient_table_size": len(self.gradient_table)
         }
+        
+        # Add endpoint registry info if available
+        if self.endpoint_registry:
+            my_info = self.endpoint_registry.get_my_endpoint_info()
+            stats["my_endpoints"] = {
+                "local_ips": my_info.local_ips,
+                "port": my_info.local_port,
+                "relay": my_info.relay_url
+            }
+            stats["known_peer_endpoints"] = len(self.endpoint_registry.get_all_peers())
+        
+        return stats
