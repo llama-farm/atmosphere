@@ -2169,3 +2169,350 @@ async def refresh_network():
         "all_ips": all_ips,
         "timestamp": time.time()
     }
+
+
+# ============================================================================
+# Saved Meshes API - Mesh Persistence
+# ============================================================================
+
+class SaveMeshRequest(BaseModel):
+    """Request to save a mesh."""
+    mesh_id: str = Field(..., description="Mesh ID")
+    mesh_name: str = Field(..., description="Mesh name")
+    endpoints: List[str] = Field(default_factory=list, description="Known endpoints")
+    is_founder: bool = Field(default=False, description="Whether this node founded the mesh")
+    public_key: Optional[str] = Field(default=None, description="Mesh public key")
+
+
+@router.get("/meshes")
+async def list_saved_meshes():
+    """
+    List all saved meshes with their connection status.
+    
+    Saved meshes persist across restarts.
+    """
+    from ..mesh.routing import get_mesh_persistence, SavedMesh
+    
+    server = get_server()
+    persistence = get_mesh_persistence()
+    
+    meshes = []
+    active_mesh_id = persistence.active_mesh_id
+    
+    # Current live mesh info
+    current_mesh_id = None
+    if server and server.node and server.node.mesh:
+        current_mesh_id = server.node.mesh.mesh_id
+    
+    for saved in persistence.list_meshes():
+        is_active = saved.mesh_id == active_mesh_id
+        is_connected = saved.mesh_id == current_mesh_id and server and server._running
+        
+        meshes.append({
+            "mesh_id": saved.mesh_id,
+            "mesh_name": saved.mesh_name,
+            "is_active": is_active,
+            "is_connected": is_connected,
+            "is_founder": saved.is_founder,
+            "peer_count": len(saved.peers),
+            "endpoint_count": len(saved.endpoints),
+            "created_at": saved.created_at,
+            "last_connected": saved.last_connected,
+        })
+    
+    return {
+        "meshes": meshes,
+        "active_mesh_id": active_mesh_id,
+        "current_mesh_id": current_mesh_id,
+        "timestamp": time.time()
+    }
+
+
+@router.post("/meshes")
+async def save_mesh(request: SaveMeshRequest):
+    """
+    Save a mesh configuration.
+    
+    This saves the mesh for quick reconnection later.
+    """
+    from ..mesh.routing import get_mesh_persistence, SavedMesh
+    
+    server = get_server()
+    persistence = get_mesh_persistence()
+    
+    # Get current peers if this is the active mesh
+    peers = []
+    if server and server.node and server.node.mesh and server.node.mesh.mesh_id == request.mesh_id:
+        # Add relay peers
+        relay_peers = getattr(server, '_relay_peers', {})
+        for node_id, peer_info in relay_peers.items():
+            peers.append({
+                "node_id": node_id,
+                "name": peer_info.get("name", node_id[:8]),
+                "capabilities": peer_info.get("capabilities", []),
+                "via": "relay"
+            })
+        # Add mDNS peers
+        if server.discovery:
+            for p in server.discovery.peers:
+                if not any(peer.get("node_id") == p.node_id for peer in peers):
+                    peers.append({
+                        "node_id": p.node_id,
+                        "name": p.name,
+                        "capabilities": p.capabilities,
+                        "via": "mdns"
+                    })
+    
+    mesh = SavedMesh(
+        mesh_id=request.mesh_id,
+        mesh_name=request.mesh_name,
+        peers=peers,
+        endpoints=request.endpoints,
+        created_at=time.time(),
+        last_connected=time.time(),
+        is_founder=request.is_founder,
+        public_key=request.public_key,
+    )
+    
+    persistence.add_mesh(mesh)
+    
+    return {
+        "success": True,
+        "mesh_id": mesh.mesh_id,
+        "peer_count": len(peers),
+        "message": f"Mesh '{mesh.mesh_name}' saved"
+    }
+
+
+@router.delete("/meshes/{mesh_id}")
+async def forget_mesh(mesh_id: str):
+    """
+    Remove a mesh from saved meshes.
+    
+    This doesn't disconnect - just removes from persistence.
+    """
+    from ..mesh.routing import get_mesh_persistence
+    
+    persistence = get_mesh_persistence()
+    
+    if persistence.remove_mesh(mesh_id):
+        return {"success": True, "message": f"Mesh {mesh_id} forgotten"}
+    else:
+        raise HTTPException(status_code=404, detail="Mesh not found")
+
+
+@router.post("/meshes/{mesh_id}/activate")
+async def activate_mesh(mesh_id: str):
+    """
+    Set a mesh as the active mesh.
+    
+    This is the mesh that will be connected on startup.
+    """
+    from ..mesh.routing import get_mesh_persistence
+    
+    persistence = get_mesh_persistence()
+    
+    if persistence.set_active_mesh(mesh_id):
+        mesh = persistence.get_mesh(mesh_id)
+        return {
+            "success": True,
+            "active_mesh_id": mesh_id,
+            "mesh_name": mesh.mesh_name if mesh else None
+        }
+    else:
+        raise HTTPException(status_code=404, detail="Mesh not found")
+
+
+# ============================================================================
+# Routing Table API - Smart Mesh Routing
+# ============================================================================
+
+@router.get("/routing")
+async def get_routing_table():
+    """
+    Get the current routing table.
+    
+    Shows all known routes to peers, including:
+    - Transport type (BLE, LAN, Relay)
+    - Hop count
+    - Latency
+    - Reliability
+    - Computed cost
+    """
+    server = get_server()
+    if not server:
+        raise HTTPException(status_code=503, detail="Server not ready")
+    
+    # Get routing table from gossip protocol
+    routes = []
+    routing_stats = None
+    
+    if server.gossip:
+        routing_table = server.gossip.get_routing_table()
+        routes = routing_table.export()
+        routing_stats = routing_table.stats()
+    
+    # Also include gradient table info for comparison
+    gradient_info = None
+    if server.router:
+        gradient_info = {
+            "entries": len(server.router.gradient_table),
+            "capabilities": list(server.router.local_capabilities.keys()),
+        }
+    
+    return {
+        "routes": routes,
+        "stats": routing_stats,
+        "gradient_table": gradient_info,
+        "node_id": server.node.node_id if server.node else None,
+        "timestamp": time.time()
+    }
+
+
+@router.get("/routing/{dest_id}")
+async def get_route(dest_id: str):
+    """
+    Get routing info for a specific destination.
+    
+    Returns the best route and all alternative routes.
+    """
+    server = get_server()
+    if not server or not server.gossip:
+        raise HTTPException(status_code=503, detail="Server not ready")
+    
+    routing_table = server.gossip.get_routing_table()
+    
+    best_route = routing_table.get_best_route(dest_id)
+    all_routes = routing_table.get_all_routes(dest_id)
+    
+    if not best_route:
+        return {
+            "found": False,
+            "destination": dest_id,
+            "message": "No route to destination"
+        }
+    
+    return {
+        "found": True,
+        "destination": dest_id,
+        "best_route": best_route.to_dict(),
+        "alternative_routes": [r.to_dict() for r in all_routes if r != best_route],
+        "route_count": len(all_routes)
+    }
+
+
+# ============================================================================
+# Transport Status API - Multi-Transport Visibility
+# ============================================================================
+
+@router.get("/transports")
+async def get_transports():
+    """
+    Get status of all mesh transports.
+    
+    Shows:
+    - Enabled transports (BLE, LAN, Relay, WiFi Direct, Matter)
+    - Connection status for each
+    - Health metrics and latency
+    - Peer counts per transport
+    
+    Philosophy: Connect ALL, Use BEST, Failover INSTANT
+    """
+    server = get_server()
+    if not server:
+        raise HTTPException(status_code=503, detail="Server not ready")
+    
+    # Base transport info
+    transports = {
+        "node_id": server.node.node_id if server.node else "unknown",
+        "enabled": {
+            "lan": True,
+            "relay": bool(getattr(server.config, 'relay_url', None)),
+            "ble": False,  # TODO: Check BLE availability
+            "wifi_direct": False,  # Future
+            "matter": False,  # Future
+        },
+        "status": {},
+        "peers_by_transport": {},
+        "stats": {
+            "messages_sent": 0,
+            "messages_received": 0,
+            "failovers": 0,
+        }
+    }
+    
+    # LAN transport status
+    transports["status"]["lan"] = {
+        "state": "active" if server.discovery else "disabled",
+        "peer_count": len(server.discovery.peers) if server.discovery else 0,
+    }
+    transports["peers_by_transport"]["lan"] = [
+        {"node_id": p.node_id, "name": p.name, "address": p.address}
+        for p in (server.discovery.peers if server.discovery else [])
+    ]
+    
+    # Relay transport status
+    relay_connected = (
+        server.relay_client is not None and
+        server.relay_client.ws is not None and
+        not server.relay_client.ws.closed
+    )
+    relay_peers = getattr(server, '_relay_peers', {})
+    
+    transports["status"]["relay"] = {
+        "state": "connected" if relay_connected else "disconnected",
+        "url": getattr(server.config, 'relay_url', None),
+        "peer_count": len(relay_peers),
+    }
+    transports["peers_by_transport"]["relay"] = [
+        {"node_id": node_id, "name": info.get("name", node_id[:8])}
+        for node_id, info in relay_peers.items()
+    ]
+    
+    # BLE transport status (if available)
+    if hasattr(server, 'ble_transport') and server.ble_transport:
+        ble = server.ble_transport
+        transports["enabled"]["ble"] = True
+        transports["status"]["ble"] = {
+            "state": "active" if ble.is_running() else "inactive",
+            "peer_count": ble.get_peer_count(),
+            "metrics": ble.get_metrics(),
+        }
+        transports["peers_by_transport"]["ble"] = [
+            {"node_id": p.node_id, "name": p.name, "rssi": p.rssi}
+            for p in ble.get_peers()
+        ]
+    
+    # Routing table transport breakdown
+    if server.gossip:
+        routing_table = server.gossip.get_routing_table()
+        transports["routing"] = routing_table.get_transport_status()
+    
+    # Resilient mesh status (if available)
+    if hasattr(server, 'mesh_connection') and server.mesh_connection:
+        mesh_status = server.mesh_connection.get_status()
+        transports["resilient_mesh"] = mesh_status
+    
+    transports["timestamp"] = time.time()
+    return transports
+
+
+@router.get("/gossip/stats")
+async def get_gossip_stats():
+    """
+    Get detailed gossip protocol statistics.
+    
+    Includes routing table stats, endpoint registry info,
+    and announcement counters.
+    """
+    server = get_server()
+    if not server or not server.gossip:
+        raise HTTPException(status_code=503, detail="Gossip protocol not running")
+    
+    stats = server.gossip.stats()
+    
+    return {
+        "gossip": stats,
+        "known_nodes": list(server.gossip.known_nodes()),
+        "timestamp": time.time()
+    }

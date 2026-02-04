@@ -4,6 +4,7 @@ Gossip protocol for capability propagation.
 Nodes periodically announce their capabilities to neighbors.
 Announcements propagate through the mesh with TTL decrement.
 Includes dynamic endpoint discovery for multi-homed nodes.
+Enhanced with smart routing table for true mesh routing.
 """
 
 import asyncio
@@ -18,6 +19,7 @@ import numpy as np
 
 from ..router.gradient import GradientTable, GradientEntry
 from ..network.ip_detect import EndpointRegistry, EndpointInfo, get_best_local_ip, get_all_local_ips
+from .routing import RoutingTable, RouteEntry, TransportType
 
 logger = logging.getLogger(__name__)
 
@@ -156,6 +158,8 @@ class GossipProtocol:
     Periodically announces capabilities to peers. Processes incoming
     announcements and updates gradient table. Propagates dynamic
     endpoint information for multi-homed networking.
+    
+    Enhanced with smart routing table for true mesh routing.
     """
 
     def __init__(
@@ -179,11 +183,15 @@ class GossipProtocol:
         self._nonce_cache_lock = asyncio.Lock()
         self._known_nodes: Dict[str, float] = {}
 
+        # Smart routing table
+        self.routing_table = RoutingTable(node_id)
+        
         # Metrics
         self._announcements_sent = 0
         self._announcements_received = 0
         self._announcements_forwarded = 0
         self._endpoint_updates = 0
+        self._route_updates = 0
 
     def set_broadcast_callback(self, callback: BroadcastCallback) -> None:
         """Set the callback for broadcasting messages to peers."""
@@ -290,6 +298,12 @@ class GossipProtocol:
                 self._endpoint_updates += 1
                 logger.info(f"Updated endpoints for {announcement.from_node}: {announcement.endpoints.local_ips}")
 
+        # Update routing table from announcement
+        route_updates = self.routing_table.on_peer_announcement(announcement.to_dict())
+        if route_updates > 0:
+            self._route_updates += route_updates
+            logger.debug(f"Routing table: {route_updates} route updates from {announcement.from_node}")
+
         updates = 0
         for cap in announcement.capabilities:
             vector = np.array(cap.vector, dtype=np.float32)
@@ -391,9 +405,13 @@ class GossipProtocol:
             "announcements_received": self._announcements_received,
             "announcements_forwarded": self._announcements_forwarded,
             "endpoint_updates": self._endpoint_updates,
+            "route_updates": self._route_updates,
             "known_nodes": len(self.known_nodes()),
             "gradient_table_size": len(self.gradient_table)
         }
+        
+        # Add routing table stats
+        stats["routing"] = self.routing_table.stats()
         
         # Add endpoint registry info if available
         if self.endpoint_registry:
@@ -406,3 +424,11 @@ class GossipProtocol:
             stats["known_peer_endpoints"] = len(self.endpoint_registry.get_all_peers())
         
         return stats
+    
+    def get_routing_table(self) -> RoutingTable:
+        """Get the routing table for external access."""
+        return self.routing_table
+    
+    def get_best_route(self, dest_id: str) -> Optional[RouteEntry]:
+        """Get the best route to a destination node."""
+        return self.routing_table.get_best_route(dest_id)

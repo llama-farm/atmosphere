@@ -1,6 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import { Activity, Wifi, Zap, Users, ArrowUp, ArrowDown, Camera, Mic, Brain, Search, Wrench } from 'lucide-react';
 import { CostMetrics } from './CostMetrics';
+import { RoutingCard } from './RoutingCard';
+import { MeshManager } from './MeshManager';
+import { RoutingTable } from './RoutingTable';
+import { TransportStatus } from './TransportStatus';
 import './Dashboard.css';
 
 export const Dashboard = ({ wsData }) => {
@@ -185,8 +189,20 @@ export const Dashboard = ({ wsData }) => {
         />
       </div>
 
+      {/* 🎯 Intent Classification - THE CROWN JEWEL */}
+      <RoutingCard wsData={wsData} />
+
       {/* Cost Metrics Panel */}
       <CostMetrics refreshInterval={10000} />
+
+      {/* Mesh Management Panel */}
+      <div className="mesh-panels-grid">
+        <MeshManager wsData={wsData} />
+        <TransportStatus wsData={wsData} />
+      </div>
+
+      {/* Routing Table */}
+      <RoutingTable wsData={wsData} />
 
       {/* Capability Summary Panel */}
       <div className="capability-summary-panel">

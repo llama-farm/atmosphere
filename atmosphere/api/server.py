@@ -8,6 +8,7 @@ sys.stderr.flush()
 
 import asyncio
 import logging
+import time
 from contextlib import asynccontextmanager
 from typing import Optional
 
@@ -22,6 +23,7 @@ from ..router.semantic import SemanticRouter
 from ..router.executor import Executor
 from ..mesh.gossip import GossipProtocol
 from ..mesh.discovery import MeshDiscovery
+from ..mesh.routing import get_mesh_persistence, SavedMesh
 from ..network.relay import RelayClient
 from ..network.resilient_transport import (
     ResilientTransportManager,
@@ -100,6 +102,10 @@ class AtmosphereServer:
         """Initialize all components."""
         logger.info("Initializing Atmosphere server...")
         
+        # Load mesh persistence (saved meshes across restarts)
+        persistence = get_mesh_persistence()
+        logger.info(f"Loaded {len(persistence.list_meshes())} saved meshes")
+        
         # Load or create node identity
         if self.config.identity_path.exists():
             identity = NodeIdentity.load(self.config.identity_path)
@@ -114,6 +120,22 @@ class AtmosphereServer:
         if self.config.mesh_path.exists():
             mesh = MeshIdentity.load(self.config.mesh_path)
             logger.info(f"Loaded mesh: {mesh.name} ({mesh.mesh_id})")
+            
+            # Auto-save to persistence if not already saved
+            if not persistence.get_mesh(mesh.mesh_id):
+                persistence.add_mesh(SavedMesh(
+                    mesh_id=mesh.mesh_id,
+                    mesh_name=mesh.name,
+                    peers=[],
+                    endpoints=[],
+                    created_at=mesh.created_at if hasattr(mesh, 'created_at') else time.time(),
+                    last_connected=time.time(),
+                    is_founder=hasattr(mesh, '_master_keypair') and mesh._master_keypair is not None,
+                ))
+                logger.info(f"Auto-saved mesh {mesh.name} to persistence")
+            
+            # Set as active mesh
+            persistence.set_active_mesh(mesh.mesh_id)
         
         self.node = Node(identity=identity, mesh=mesh)
         
@@ -339,6 +361,7 @@ class AtmosphereServer:
     async def _start_gossip(self) -> None:
         """Start the gossip protocol for capability propagation."""
         from ..mesh.gossip import GossipProtocol, CapabilityInfo
+        from ..network.ip_detect import init_endpoint_registry
         
         if not self.node or not self.router:
             logger.debug("No node/router, skipping gossip")
@@ -359,12 +382,24 @@ class AtmosphereServer:
                 models=cap.models if hasattr(cap, 'models') else []
             ))
         
-        # Create gossip protocol
+        # Initialize endpoint registry for dynamic IP propagation
+        relay_base = getattr(self.config, 'relay_url', None)
+        mesh_id = self.node.mesh.mesh_id if self.node.mesh else None
+        endpoint_registry = init_endpoint_registry(
+            node_id=self.node.node_id,
+            port=self.config.server.port,
+            relay_base=relay_base,
+            mesh_id=mesh_id
+        )
+        logger.info(f"Endpoint registry initialized with IPs: {endpoint_registry._my_ips}")
+        
+        # Create gossip protocol with endpoint registry
         self.gossip = GossipProtocol(
             node_id=self.node.node_id,
             gradient_table=self.router.gradient_table,
             local_capabilities=local_caps,
-            announce_interval=self.config.gossip_interval or 30
+            announce_interval=self.config.gossip_interval or 30,
+            endpoint_registry=endpoint_registry
         )
         
         # Set broadcast callback - sends via relay if connected

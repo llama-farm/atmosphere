@@ -352,6 +352,26 @@
   word-break: break-word;
 }
 
+/* Mesh Management Panels */
+.mesh-panels-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+  gap: 1.5rem;
+  margin-bottom: 1.5rem;
+}
+
+.dashboard .mesh-manager,
+.dashboard .transport-status,
+.dashboard .routing-table {
+  margin-bottom: 0;
+}
+
+@media (max-width: 900px) {
+  .mesh-panels-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 @media (max-width: 768px) {
   .dashboard {
     padding: 1rem;
@@ -368,6 +388,10 @@
   }
 
   .stats-grid {
+    grid-template-columns: 1fr;
+  }
+  
+  .mesh-panels-grid {
     grid-template-columns: 1fr;
   }
 }
