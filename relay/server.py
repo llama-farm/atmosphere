@@ -77,17 +77,19 @@ class TokenStore:
         public_key_b64: str, 
         founder_proof: str,
         founder_node_id: str,
-        mesh_name: str = ""
+        mesh_name: str = "",
+        node_public_key_b64: str = ""
     ) -> tuple[bool, str]:
         """
         Register a mesh's public key. Only first founder can register.
         
         Args:
             mesh_id: The mesh ID
-            public_key_b64: Base64-encoded Ed25519 public key
-            founder_proof: Signature of mesh_id by the mesh's private key
+            public_key_b64: Base64-encoded mesh master public key (for token verification later)
+            founder_proof: Signature of mesh_id by the founder's node key
             founder_node_id: The founder's node ID
             mesh_name: Human-readable mesh name
+            node_public_key_b64: Base64-encoded founder's node public key (for proof verification)
         
         Returns:
             (success, message)
@@ -102,14 +104,19 @@ class TokenStore:
         try:
             from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
             
-            public_key = base64.b64decode(public_key_b64)
-            pubkey = Ed25519PublicKey.from_public_bytes(public_key)
+            # If node public key provided, verify against that (founder's node key)
+            # Otherwise fall back to mesh master key (for backward compat)
+            verify_key_b64 = node_public_key_b64 if node_public_key_b64 else public_key_b64
+            verify_key = base64.b64decode(verify_key_b64)
+            pubkey = Ed25519PublicKey.from_public_bytes(verify_key)
             sig_bytes = base64.b64decode(founder_proof)
             
-            # Verify founder owns the mesh key
+            # Verify founder signed the mesh_id
             pubkey.verify(sig_bytes, mesh_id.encode())
             
-            self._mesh_keys[mesh_id] = public_key
+            # Store the mesh master key (used for verifying tokens later)
+            mesh_key = base64.b64decode(public_key_b64)
+            self._mesh_keys[mesh_id] = mesh_key
             self._mesh_names[mesh_id] = mesh_name
             self._founders[mesh_id].add(founder_node_id)
             
@@ -394,8 +401,9 @@ async def relay_endpoint(websocket: WebSocket, mesh_id: str):
                 await websocket.close(1008, "Missing required fields")
                 return
             
+            node_public_key = msg.get("node_public_key", "")
             success, message = token_store.register_mesh(
-                mesh_id, mesh_public_key, founder_proof, node_id, mesh_name
+                mesh_id, mesh_public_key, founder_proof, node_id, mesh_name, node_public_key
             )
             
             if not success:
@@ -459,7 +467,7 @@ async def relay_endpoint(websocket: WebSocket, mesh_id: str):
             else:
                 logger.warning(f"Node {node_id} joining unregistered mesh {mesh_id}")
         
-        else:
+        elif msg_type not in ("register_mesh", "join", "register"):
             await websocket.close(1008, "First message must be register_mesh or join")
             return
         
@@ -507,7 +515,15 @@ async def relay_endpoint(websocket: WebSocket, mesh_id: str):
             "is_founder": is_founder,
         })
         
-        # Send peer list
+        # Send joined confirmation first (what clients expect)
+        await websocket.send_json({
+            "type": "joined",
+            "mesh": mesh.name,
+            "mesh_id": mesh_id,
+            "node_count": mesh.peer_count,
+        })
+        
+        # Then send peer list
         await websocket.send_json({
             "type": "peers",
             "peers": mesh.get_peer_info_list(exclude=node_id),
