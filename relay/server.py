@@ -68,7 +68,7 @@ class TokenStore:
         self._mesh_keys: dict[str, bytes] = {}  # mesh_id -> public key
         self._mesh_names: dict[str, str] = {}  # mesh_id -> name
         self._founders: dict[str, set] = defaultdict(set)  # mesh_id -> founder node_ids
-        self._used_nonces: set[str] = set()
+        self._used_nonces: dict[str, str] = {}  # nonce -> node_id (allows reconnect from same node)
         self._nonce_expiry: dict[str, float] = {}
     
     def register_mesh(
@@ -166,9 +166,13 @@ class TokenStore:
             if bound_node and bound_node != node_id:
                 return False, "Token bound to different node"
             
-            # Check replay
+            # Check replay - but allow reconnection from same node
             if nonce in self._used_nonces:
-                return False, "Token already used (replay)"
+                existing_node = self._used_nonces[nonce]
+                if existing_node != node_id:
+                    return False, "Token already used by another device (replay)"
+                # Same node reconnecting - allowed
+                logger.info(f"Node {node_id} reconnecting with existing token")
             
             # Get mesh public key
             mesh_key = self._mesh_keys.get(mesh_id)
@@ -196,8 +200,8 @@ class TokenStore:
             sig_bytes = base64.b64decode(signature)
             pubkey.verify(sig_bytes, canonical_bytes)
             
-            # Mark nonce as used
-            self._used_nonces.add(nonce)
+            # Mark nonce as used (store node_id to allow reconnection)
+            self._used_nonces[nonce] = node_id
             self._nonce_expiry[nonce] = expires_at
             
             logger.info(f"Token verified for node {node_id} joining mesh {mesh_id}")
@@ -212,7 +216,7 @@ class TokenStore:
         now = time.time()
         expired = [n for n, exp in self._nonce_expiry.items() if exp < now]
         for nonce in expired:
-            self._used_nonces.discard(nonce)
+            self._used_nonces.pop(nonce, None)
             del self._nonce_expiry[nonce]
         if expired:
             logger.debug(f"Cleaned up {len(expired)} expired nonces")
@@ -579,25 +583,39 @@ async def relay_endpoint(websocket: WebSocket, mesh_id: str):
                         "message": f"Peer {target} not found",
                     })
             
-            elif msg_type == "llm_request":
+            elif msg_type == "llm_request" or msg_type == "chat_request":
                 stats["total_llm_requests"] += 1
                 request_id = data.get("request_id")
-                prompt = data.get("prompt")
-                model = data.get("model")
+                messages = data.get("messages", [])
+                prompt = data.get("prompt")  # Legacy support
+                model = data.get("model", "auto")
                 
+                # Convert prompt to messages format if needed
+                if not messages and prompt:
+                    messages = [{"role": "user", "content": prompt}]
+                
+                # Find peer with LLM capability (prefer founder)
                 llm_peers = [
                     p for nid, p in mesh.peers.items()
-                    if nid != node_id and ("llm" in p.capabilities or "chat" in p.capabilities)
+                    if nid != node_id and (
+                        "llm" in p.capabilities or 
+                        "chat" in p.capabilities or
+                        any("llamafarm" in c for c in p.capabilities)
+                    )
                 ]
+                
+                # Sort by founder first (likely has LlamaFarm)
+                llm_peers.sort(key=lambda p: (0 if p.is_founder else 1))
                 
                 if llm_peers:
                     target_peer = llm_peers[0]
                     try:
+                        # Send as chat_request (Mac format)
                         await target_peer.websocket.send_json({
-                            "type": "llm_request",
+                            "type": "chat_request",
                             "from": node_id,
                             "request_id": request_id,
-                            "prompt": prompt,
+                            "messages": messages,
                             "model": model,
                         })
                         stats["total_messages_relayed"] += 1
@@ -648,7 +666,9 @@ async def relay_endpoint(websocket: WebSocket, mesh_id: str):
     except WebSocketDisconnect:
         logger.info(f"Node {node_id} disconnected from mesh {mesh_id}")
     except Exception as e:
-        logger.error(f"Error in relay for {node_id}: {e}")
+        import traceback
+        logger.error(f"Error in relay for {node_id}: {type(e).__name__}: {e}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
     finally:
         if node_id and mesh_id in meshes:
             mesh = meshes[mesh_id]

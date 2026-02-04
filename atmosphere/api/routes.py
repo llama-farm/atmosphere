@@ -9,35 +9,16 @@ import time
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from .server import get_server
+from .server import get_server, manager
 from ..router.semantic import RouteAction
+from ..registry.devices import get_device_registry, TrustLevel
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-
-# WebSocket connection manager
-class ConnectionManager:
-    def __init__(self):
-        self.active_connections: List[WebSocket] = []
-
-    async def connect(self, websocket: WebSocket):
-        await websocket.accept()
-        self.active_connections.append(websocket)
-
-    def disconnect(self, websocket: WebSocket):
-        self.active_connections.remove(websocket)
-
-    async def broadcast(self, message: dict):
-        for connection in self.active_connections:
-            try:
-                await connection.send_json(message)
-            except:
-                pass
-
-manager = ConnectionManager()
 
 
 # ============ Request/Response Models ============
@@ -178,6 +159,84 @@ async def route_intent(request: RouteRequest):
     )
 
 
+class ProjectRouteRequest(BaseModel):
+    """Request to route to a LlamaFarm project."""
+    intent: str = Field(..., description="User intent/query")
+    messages: Optional[List[ChatMessage]] = Field(default=None, description="Optional chat messages for context")
+
+
+class ProjectRouteResponse(BaseModel):
+    """Response from project routing."""
+    project: Optional[str] = None
+    namespace: Optional[str] = None
+    name: Optional[str] = None
+    score: float = 0.0
+    tier: str = "fallback"
+    domain: Optional[str] = None
+    reason: str = ""
+
+
+@router.post("/route/project", response_model=ProjectRouteResponse)
+async def route_to_project(request: ProjectRouteRequest):
+    """
+    Route an intent to the best LlamaFarm project using FastProjectRouter.
+    
+    Uses semantic matching with 3-tier cascade:
+    1. Embedding match (neural or hash-based)
+    2. Hash fallback (character n-gram matching)  
+    3. Keyword match (pure keyword overlap)
+    
+    Returns the best matching project without executing.
+    """
+    server = get_server()
+    if not server:
+        raise HTTPException(status_code=503, detail="Server not ready")
+    
+    # Use FastProjectRouter if available
+    fast_router = getattr(server, '_fast_router', None)
+    if not fast_router:
+        raise HTTPException(status_code=503, detail="FastProjectRouter not initialized")
+    
+    # Build messages for routing
+    if request.messages:
+        messages = [{"role": m.role, "content": m.content} for m in request.messages]
+    else:
+        messages = [{"role": "user", "content": request.intent}]
+    
+    # Route using FastProjectRouter
+    result = fast_router.route("auto", messages)
+    
+    return ProjectRouteResponse(
+        project=result.project.model_path if result.project else None,
+        namespace=result.project.namespace if result.project else None,
+        name=result.project.name if result.project else None,
+        score=result.score,
+        tier=result.tier.value,
+        domain=result.project.domain if result.project else None,
+        reason=result.reason
+    )
+
+
+@router.post("/route/project/test")
+async def test_project_routing(request: ProjectRouteRequest):
+    """
+    Test all cascade tiers for project routing.
+    
+    Useful for debugging and understanding routing decisions.
+    Returns detailed information about each routing tier.
+    """
+    server = get_server()
+    if not server:
+        raise HTTPException(status_code=503, detail="Server not ready")
+    
+    fast_router = getattr(server, '_fast_router', None)
+    if not fast_router:
+        raise HTTPException(status_code=503, detail="FastProjectRouter not initialized")
+    
+    # Test cascade
+    return fast_router.test_cascade(request.intent)
+
+
 @router.post("/execute", response_model=ExecuteResponse)
 async def execute_intent(request: ExecuteRequest):
     """
@@ -231,21 +290,34 @@ async def chat_completions(request: ChatCompletionRequest):
     # Format as OpenAI response
     response_message = result.data.get("message", {})
     
-    return ChatCompletionResponse(
-        id=f"chatcmpl-{int(time.time() * 1000)}",
-        created=int(time.time()),
-        model=request.model,
-        choices=[{
+    # Extract routing info (THE CROWN JEWEL!)
+    routing_info = result.data.get("_routing")
+    backend = result.data.get("_backend")
+    
+    response_dict = {
+        "id": f"chatcmpl-{int(time.time() * 1000)}",
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": request.model,
+        "choices": [{
             "index": 0,
             "message": response_message,
             "finish_reason": "stop"
         }],
-        usage={
+        "usage": {
             "prompt_tokens": 0,
             "completion_tokens": 0,
             "total_tokens": 0
         }
-    )
+    }
+    
+    # Add routing info (THE CROWN JEWEL!)
+    if routing_info:
+        response_dict["routing"] = routing_info
+    if backend:
+        response_dict["backend"] = backend
+    
+    return JSONResponse(content=response_dict)
 
 
 @router.get("/capabilities", response_model=List[CapabilityInfo])
@@ -277,11 +349,19 @@ async def mesh_status():
     
     mesh = server.node.mesh if server.node else None
     
+    # Count peers from both local discovery and relay
+    local_peers = len(server.discovery.peers) if server.discovery else 0
+    relay_peers = len(getattr(server, '_relay_peers', {}))
+    total_peers = local_peers + relay_peers
+    
+    # Node count: self + peers
+    node_count = 1 + total_peers
+    
     return MeshStatus(
         mesh_id=mesh.mesh_id if mesh else None,
         mesh_name=mesh.name if mesh else None,
-        node_count=len(mesh.founding_members) if mesh else 0,
-        peer_count=len(server.discovery.peers) if server.discovery else 0,
+        node_count=node_count,
+        peer_count=total_peers,
         capabilities=list(server.router.local_capabilities.keys()) if server.router else [],
         is_founder=server.node.is_founder if server.node else False
     )
@@ -333,22 +413,47 @@ async def join_mesh(request: JoinRequest):
 
 @router.get("/mesh/peers")
 async def list_peers():
-    """List discovered peers."""
+    """List all discovered peers (local mDNS + relay)."""
     server = get_server()
-    if not server or not server.discovery:
+    if not server:
         raise HTTPException(status_code=503, detail="Server not ready")
     
-    return {
-        "peers": [
-            {
+    peers = []
+    
+    # Add local mDNS-discovered peers
+    if server.discovery:
+        for p in server.discovery.peers:
+            peers.append({
                 "node_id": p.node_id,
                 "name": p.name,
                 "address": p.address,
                 "mesh_id": p.mesh_id,
-                "capabilities": p.capabilities
-            }
-            for p in server.discovery.peers
-        ]
+                "capabilities": p.capabilities,
+                "via": "mdns"
+            })
+    
+    # Add relay-connected peers
+    relay_peers = getattr(server, '_relay_peers', {})
+    for node_id, peer_info in relay_peers.items():
+        # Avoid duplicates (same node via both mdns and relay)
+        if not any(p.get("node_id") == node_id for p in peers):
+            peers.append({
+                "node_id": node_id,
+                "name": peer_info.get("name", node_id[:8]),
+                "address": None,  # No direct address for relay peers
+                "mesh_id": server.node.mesh.mesh_id if server.node and server.node.mesh else None,
+                "capabilities": peer_info.get("capabilities", []),
+                "via": "relay",
+                "is_founder": peer_info.get("is_founder", False)
+            })
+    
+    return {
+        "peers": peers,
+        "count": len(peers),
+        "sources": {
+            "mdns": len(server.discovery.peers) if server.discovery else 0,
+            "relay": len(relay_peers)
+        }
     }
 
 
@@ -406,25 +511,57 @@ async def mesh_topology():
     except Exception:
         pass
     
+    # Track added node IDs to avoid duplicates
+    added_node_ids = {this_node["id"]}
+    
+    # Add mDNS-discovered peers
     if server.discovery:
         for peer in server.discovery.peers:
-            peer_cost_data = peer_costs.get(peer.node_id, {})
+            if peer.node_id not in added_node_ids:
+                peer_cost_data = peer_costs.get(peer.node_id, {})
+                nodes.append({
+                    "id": peer.node_id,
+                    "name": peer.name,
+                    "status": "active",
+                    "isLeader": False,
+                    "type": "llm",
+                    "triggers": [],
+                    "tools": peer.capabilities,
+                    "cost": peer_cost_data.get("cost"),
+                    "costFactors": peer_cost_data.get("factors"),
+                    "via": "mdns",
+                })
+                # Add link from this node to peer
+                links.append({
+                    "source": this_node["id"],
+                    "target": peer.node_id,
+                })
+                added_node_ids.add(peer.node_id)
+    
+    # Add relay-connected peers
+    relay_peers = getattr(server, '_relay_peers', {})
+    for node_id, peer_info in relay_peers.items():
+        if node_id not in added_node_ids:
+            peer_cost_data = peer_costs.get(node_id, {})
             nodes.append({
-                "id": peer.node_id,
-                "name": peer.name,
+                "id": node_id,
+                "name": peer_info.get("name", node_id[:8]),
                 "status": "active",
-                "isLeader": False,
+                "isLeader": peer_info.get("is_founder", False),
                 "type": "llm",
                 "triggers": [],
-                "tools": peer.capabilities,
+                "tools": peer_info.get("capabilities", []),
                 "cost": peer_cost_data.get("cost"),
                 "costFactors": peer_cost_data.get("factors"),
+                "via": "relay",
             })
-            # Add link from this node to peer
+            # Add link from this node to relay peer
             links.append({
                 "source": this_node["id"],
-                "target": peer.node_id,
+                "target": node_id,
+                "type": "relay",  # Mark as relay connection
             })
+            added_node_ids.add(node_id)
     
     return {
         "nodes": nodes,
@@ -432,6 +569,97 @@ async def mesh_topology():
         "mesh_id": server.node.mesh.mesh_id if server.node and server.node.mesh else None,
         "mesh_name": server.node.mesh.name if server.node and server.node.mesh else "Local Mesh",
     }
+
+
+@router.get("/mesh/transports")
+async def get_transport_status():
+    """
+    Get resilient transport status for all peer connections.
+    
+    Shows:
+    - All active transports per peer (LAN, Relay, BLE, etc.)
+    - Real-time latency and health metrics for each
+    - Which transport is currently "best" (lowest latency + highest reliability)
+    - Failover history and reconnection attempts
+    
+    Design Philosophy:
+    - ALL available transports are connected simultaneously
+    - Messages route through BEST transport (by score)
+    - Instant failover when primary fails (already connected to alternatives)
+    - Continuous health monitoring keeps connections warm
+    """
+    server = get_server()
+    if not server:
+        raise HTTPException(status_code=503, detail="Server not ready")
+    
+    # Check if resilient transport manager is available
+    resilient_manager = getattr(server, 'resilient_transport', None)
+    
+    transports = {
+        "node_id": server.node.node_id if server.node else "unknown",
+        "transport_types": ["lan", "relay", "ble", "wifi_direct", "matter"],
+        "enabled": {
+            "lan": True,
+            "relay": bool(getattr(server.config, 'relay_url', None)),
+            "ble": False,  # Future
+            "wifi_direct": False,  # Future
+            "matter": False,  # Future
+        },
+        "global_stats": {
+            "messages_sent": 0,
+            "messages_received": 0,
+            "failovers": 0,
+            "reconnects": 0,
+        },
+        "peers": {},
+    }
+    
+    if resilient_manager:
+        # Use resilient transport manager status
+        status = resilient_manager.get_status()
+        transports["global_stats"] = status.get("stats", transports["global_stats"])
+        transports["peers"] = status.get("peers", {})
+    else:
+        # Fallback: build status from existing connections
+        # mDNS peers
+        if server.discovery:
+            for peer in server.discovery.peers:
+                peer_id = peer.get("node_id", peer.get("id", "unknown"))
+                transports["peers"][peer_id] = {
+                    "reachable": True,
+                    "transports": {
+                        "lan": {
+                            "state": "connected",
+                            "latency_ms": None,  # Would need to ping
+                            "score": 0.9,  # LAN assumed fast
+                        }
+                    },
+                    "best_transport": "lan",
+                }
+        
+        # Relay peers
+        relay_peers = getattr(server, '_relay_peers', {})
+        for peer_id, peer_info in relay_peers.items():
+            if peer_id not in transports["peers"]:
+                transports["peers"][peer_id] = {
+                    "reachable": True,
+                    "transports": {},
+                    "best_transport": "relay",
+                }
+            transports["peers"][peer_id]["transports"]["relay"] = {
+                "state": "connected",
+                "latency_ms": None,
+                "score": 0.5,  # Relay assumed slower
+            }
+    
+    # Add relay server connection status
+    transports["relay"] = {
+        "connected": bool(server.relay_client and server.relay_client.ws and not server.relay_client.ws.closed),
+        "url": getattr(server.config, 'relay_url', None),
+        "peer_count": len(getattr(server, '_relay_peers', {})),
+    }
+    
+    return transports
 
 
 @router.post("/mesh/token")
@@ -443,18 +671,45 @@ async def generate_invite_token():
     - local: For same-network connections (fastest)
     - public: For internet connections (requires port forwarding)
     - relay: For fallback when direct connection fails
+    
+    Token is cryptographically signed by the mesh founder.
     """
     server = get_server()
     if not server or not server.node:
         raise HTTPException(status_code=503, detail="Server not ready")
     
-    import secrets
     import json
     import urllib.parse
     from ..network import gather_network_info
+    from ..auth.tokens import MeshToken
     
-    # Generate a short invite code
-    token = f"ATM-{secrets.token_hex(16).upper()}"
+    # Get mesh info
+    mesh = server.node.mesh if server.node else None
+    if not mesh:
+        raise HTTPException(status_code=400, detail="Not connected to any mesh")
+    
+    # Get the mesh master keypair for signing (only founders have this)
+    mesh_keypair = getattr(mesh, '_master_keypair', None)
+    if not mesh_keypair:
+        raise HTTPException(status_code=403, detail="Only mesh founders can issue tokens")
+    
+    node_id = server.node.node_id if server.node else "unknown"
+    
+    # Create a properly signed token
+    mesh_token = MeshToken.create(
+        mesh_id=mesh.mesh_id,
+        issuer_keypair=mesh_keypair,
+        issuer_id=node_id,
+        node_id=None,  # Open invite (any node can use)
+        capabilities=["participant", "llm", "embeddings"],
+        ttl_seconds=86400,  # 24 hours
+    )
+    
+    # Get token dict for JSON serialization
+    token_dict = mesh_token.to_dict()
+    
+    # Also generate a short display code for easy reference
+    token_display = f"ATM-{mesh_token.nonce[:8].upper()}"
     
     # Gather network info (local IP + STUN discovery for public IP)
     port = 11451  # Default Atmosphere port
@@ -505,10 +760,9 @@ async def generate_invite_token():
     
     # Build comprehensive invite payload
     mesh_name = mesh.name if mesh else "local"
-    mesh_id = mesh.mesh_id if mesh else "default-mesh"
+    mesh_id = mesh.mesh_id
     node_name = server.node.name if server.node else "unknown"
-    node_id = server.node.node_id if server.node else "unknown"
-    expires_at = int(time.time()) + 86400  # 24 hours
+    expires_at = mesh_token.expires_at
     
     # Get capabilities this mesh offers
     capabilities = []
@@ -519,25 +773,31 @@ async def generate_invite_token():
         except:
             capabilities = []
     
+    # Get mesh public key for verification
+    mesh_public_key = mesh_keypair.public_key_b64()
+    
     # Comprehensive invite object - everything needed to join
+    # v2 includes the full signed token
     invite = {
-        "v": 1,  # Protocol version
-        "token": token,
-        "mesh": {
-            "id": mesh_id,
-            "name": mesh_name,
-            "founder": node_name,
-            "founder_id": node_id,
+        "v": 2,  # Protocol version - v2 has signed token
+        "t": token_dict,  # Short key for smaller QR
+        "td": token_display,
+        "m": {
+            "i": mesh_id,
+            "n": mesh_name,
+            "f": node_name,
+            "fi": node_id,
+            "pk": mesh_public_key,
         },
-        "endpoints": endpoints,
-        "capabilities": capabilities,
-        "network": {
-            "local_ip": local_ip,
-            "public_ip": public_endpoint.ip if public_endpoint else None,
-            "nat": public_endpoint.ip != local_ip if public_endpoint else True,
+        "e": endpoints,
+        "c": capabilities,
+        "n": {
+            "l": local_ip,
+            "p": public_endpoint.ip if public_endpoint else None,
+            "n": public_endpoint.ip != local_ip if public_endpoint else True,
         },
-        "expires": expires_at,
-        "created": int(time.time()),
+        "ex": expires_at,
+        "cr": int(time.time()),
     }
     
     # Compact JSON for QR code (no spaces)
@@ -548,9 +808,10 @@ async def generate_invite_token():
     invite_b64 = base64.urlsafe_b64encode(invite_json.encode()).decode()
     qr_data = f"atmosphere://join/{invite_b64}"
     
-    # Also provide human-readable URL version
+    # Also provide legacy URL version (with encoded token)
     endpoints_json = urllib.parse.quote(json.dumps(endpoints))
-    qr_data_legacy = f"atmosphere://join?token={token}&mesh={mesh_name}&endpoints={endpoints_json}"
+    token_json = urllib.parse.quote(json.dumps(token_dict))
+    qr_data_legacy = f"atmosphere://join?token={token_json}&mesh={mesh_name}&endpoints={endpoints_json}"
     
     # Primary endpoint for legacy compatibility
     primary_endpoint = endpoints.get("public") or endpoints.get("local", f"ws://{local_ip}:{port}")
@@ -559,9 +820,11 @@ async def generate_invite_token():
         # Full invite object
         "invite": invite,
         # Individual fields for convenience
-        "token": token,
+        "token": token_dict,  # Full signed token for API callers
+        "token_display": token_display,  # Short human-readable code
         "mesh_id": mesh_id,
         "mesh_name": mesh_name,
+        "mesh_public_key": mesh_public_key,  # For verification
         "endpoints": endpoints,
         "capabilities": capabilities,
         "network_info": {
@@ -657,15 +920,17 @@ async def list_projects(namespace: str = None, discoverable_only: bool = False):
         # Format for mesh exposure
         formatted = []
         for p in projects:
+            ns = p.get("namespace", "default")
+            name = p.get("name", "")
             formatted.append({
-                "id": p.get("id", ""),
-                "name": p.get("name", ""),
+                "id": f"{ns}/{name}",  # Composite ID for invoke endpoint
+                "name": name,
                 "description": p.get("description", ""),
-                "namespace": p.get("namespace", ""),
+                "namespace": ns,
                 "type": p.get("type", "chat"),
                 "system_prompt": p.get("system_prompt", "")[:200] + "..." if len(p.get("system_prompt", "")) > 200 else p.get("system_prompt", ""),
                 "capabilities": ["llm", "chat"],
-                "mesh_exposed": p.get("namespace") == "discoverable",
+                "mesh_exposed": ns == "discoverable",
             })
         
         return {"projects": formatted, "count": len(formatted)}
@@ -675,15 +940,21 @@ async def list_projects(namespace: str = None, discoverable_only: bool = False):
         return {"projects": [], "count": 0, "error": str(e)}
 
 
-@router.post("/projects/{project_id}/invoke")
-async def invoke_project(project_id: str, prompt: str, context: List[dict] = None):
+class ProjectInvokeRequest(BaseModel):
+    """Request to invoke a LlamaFarm project."""
+    prompt: str
+    context: Optional[List[dict]] = None
+
+
+@router.post("/projects/{namespace}/{project_name}/invoke")
+async def invoke_project(namespace: str, project_name: str, request: ProjectInvokeRequest):
     """
     Invoke a LlamaFarm project with a prompt.
     
     Args:
-        project_id: The project ID to invoke
-        prompt: User prompt
-        context: Optional conversation context
+        namespace: Project namespace (e.g., 'discoverable')
+        project_name: Project name (e.g., 'llama-expert-14')
+        request: Prompt and optional context
         
     Returns:
         Project response
@@ -693,30 +964,33 @@ async def invoke_project(project_id: str, prompt: str, context: List[dict] = Non
         raise HTTPException(status_code=503, detail="Server not ready")
     
     try:
-        from ..discovery.llamafarm import LlamaFarmBackend, LlamaFarmConfig
+        import aiohttp
         
-        backend = LlamaFarmBackend(LlamaFarmConfig())
+        messages = request.context or []
+        messages.append({"role": "user", "content": request.prompt})
         
-        messages = context or []
-        messages.append({"role": "user", "content": prompt})
+        # Call LlamaFarm project endpoint directly
+        payload = {"messages": messages}
         
-        # TODO: Get project's system prompt and prepend
-        result = await backend.chat_completion(
-            messages=messages,
-            model=project_id  # LlamaFarm routes by project ID
-        )
-        
-        await backend.close()
+        async with aiohttp.ClientSession() as session:
+            url = f"http://localhost:14345/v1/projects/{namespace}/{project_name}/chat/completions"
+            async with session.post(url, json=payload) as resp:
+                if resp.status != 200:
+                    error = await resp.text()
+                    raise HTTPException(status_code=resp.status, detail=error)
+                result = await resp.json()
         
         return {
             "success": True,
-            "project_id": project_id,
+            "project_id": f"{namespace}/{project_name}",
             "response": result["choices"][0]["message"]["content"],
             "usage": result.get("usage", {})
         }
     
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Failed to invoke project {project_id}: {e}")
+        logger.error(f"Failed to invoke project {namespace}/{project_name}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -1068,8 +1342,14 @@ async def websocket_endpoint(websocket: WebSocket):
                     if msg_type == "join":
                         # Handle mesh join request
                         token = data.get("token")
+                        node_id = data.get("node_id", "unknown")
+                        node_name = data.get("name", "unknown")
+                        capabilities = data.get("capabilities", [])
                         mesh = server.node.mesh if server and server.node else None
-                        logger.info(f"Client joining mesh with token: {token[:20] if token else 'none'}...")
+                        
+                        # Log join (token may be dict or string)
+                        token_preview = str(token)[:30] if token else 'none'
+                        logger.info(f"Client {node_name} ({node_id}) joining mesh with token: {token_preview}...")
                         await websocket.send_json({
                             "type": "joined",
                             "mesh": mesh.name if mesh else "home-mesh",
@@ -1667,3 +1947,114 @@ async def list_backends():
             })
     
     return {"backends": backends, "timestamp": int(time.time())}
+
+
+@router.post("/intent/classify")
+async def classify_intent_endpoint(request: dict):
+    """
+    Classify an intent without executing it.
+    
+    THE CROWN JEWEL - shows routing decisions.
+    
+    Request body: {"text": "your question here"}
+    """
+    from ..router.intent_classifier import classify_intent
+    
+    text = request.get("text", "")
+    if not text:
+        raise HTTPException(status_code=400, detail="Missing 'text' field")
+    
+    classification = classify_intent(text)
+    
+    return {
+        "text": text,
+        "classification": {
+            "complexity": classification.complexity.name,
+            "complexity_value": classification.complexity.value,
+            "task_type": classification.task_type.value,
+            "model_size": classification.recommended_model_size,
+            "domain": classification.domain.value,
+            "requirements": {
+                "tools": classification.needs_tools,
+                "rag": classification.needs_rag,
+                "vision": classification.needs_vision,
+                "code": classification.needs_code,
+            },
+            "confidence": classification.confidence,
+            "matched_patterns": classification.matched_patterns
+        }
+    }
+
+
+# ============================================================================
+# Device Registry API
+# ============================================================================
+
+@router.get("/devices")
+async def list_devices():
+    """
+    List all known devices (online and offline).
+    
+    Shows all devices that have ever connected to the mesh.
+    """
+    registry = get_device_registry()
+    devices = registry.get_all_devices()
+    
+    return {
+        "devices": [d.to_dict() for d in devices],
+        "online_count": len([d for d in devices if d.status == "online"]),
+        "offline_count": len([d for d in devices if d.status == "offline"]),
+        "total_count": len(devices),
+        "timestamp": int(time.time())
+    }
+
+
+@router.get("/devices/{device_id}")
+async def get_device(device_id: str):
+    """Get info about a specific device."""
+    registry = get_device_registry()
+    device = registry.get_device(device_id)
+    
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+    
+    return device.to_dict()
+
+
+@router.post("/devices/{device_id}/block")
+async def block_device(device_id: str):
+    """Block a device from connecting."""
+    registry = get_device_registry()
+    device = registry.get_device(device_id)
+    
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+    
+    registry.block_device(device_id)
+    return {"status": "blocked", "device_id": device_id}
+
+
+@router.post("/devices/{device_id}/unblock")
+async def unblock_device(device_id: str):
+    """Unblock a device."""
+    registry = get_device_registry()
+    device = registry.get_device(device_id)
+    
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+    
+    registry.unblock_device(device_id)
+    return {"status": "unblocked", "device_id": device_id}
+
+
+@router.delete("/devices/{device_id}")
+async def remove_device(device_id: str):
+    """Remove a device from the registry."""
+    registry = get_device_registry()
+    device = registry.get_device(device_id)
+    
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+    
+    registry.remove_device(device_id)
+    return {"status": "removed", "device_id": device_id}
