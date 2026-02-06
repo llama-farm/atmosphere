@@ -10,7 +10,8 @@ WORKDIR /app
 RUN pip install --no-cache-dir \
     fastapi==0.109.0 \
     uvicorn[standard]==0.27.0 \
-    websockets==12.0
+    websockets==12.0 \
+    cryptography>=42.0.0
 
 # Copy server code
 COPY server.py .
