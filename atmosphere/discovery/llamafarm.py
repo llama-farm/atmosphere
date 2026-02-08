@@ -75,26 +75,28 @@ class LlamaFarmBackend:
                 return {}
             return await resp.json()
     
-    async def list_projects(self, namespace: Optional[str] = None) -> List[Dict[str, Any]]:
+    async def list_projects(self, namespace: str = "discoverable") -> List[Dict[str, Any]]:
         """
-        List available projects.
+        List available projects in a namespace.
         
         Args:
-            namespace: Filter by namespace (e.g., "discoverable")
+            namespace: Namespace to list projects from (default: "discoverable")
             
         Returns:
             List of project dictionaries
         """
         session = await self._get_session()
-        params = {}
-        if namespace:
-            params["namespace"] = namespace
-            
-        async with session.get(f"{self.config.base_url}/v1/projects", params=params) as resp:
+        
+        # LlamaFarm API: GET /v1/projects/{namespace}
+        url = f"{self.config.base_url}/v1/projects/{namespace}"
+        
+        async with session.get(url) as resp:
             if resp.status != 200:
+                logger.warning(f"Failed to list projects in namespace '{namespace}': {resp.status}")
                 return []
             data = await resp.json()
-            return data.get("data", [])
+            # Response format: {"total": N, "projects": [...]}
+            return data.get("projects", [])
     
     async def list_discoverable_projects(self) -> List[Dict[str, Any]]:
         """
@@ -103,6 +105,29 @@ class LlamaFarmBackend:
         These are projects that should be exposed to the mesh.
         """
         return await self.list_projects(namespace="discoverable")
+    
+    async def list_all_namespaces(self) -> List[str]:
+        """
+        List all available namespaces.
+        
+        Note: LlamaFarm doesn't have a namespace listing endpoint,
+        so we check the filesystem or return known defaults.
+        """
+        # LlamaFarm stores projects at ~/.llamafarm/projects/{namespace}/{project}/
+        from pathlib import Path
+        import os
+        
+        projects_dir = Path(os.environ.get("LF_DATA_DIR", Path.home() / ".llamafarm")) / "projects"
+        
+        if not projects_dir.exists():
+            return ["discoverable"]  # Default
+        
+        namespaces = []
+        for item in projects_dir.iterdir():
+            if item.is_dir() and not item.name.startswith("."):
+                namespaces.append(item.name)
+        
+        return namespaces if namespaces else ["discoverable"]
     
     async def list_models(self) -> List[Dict[str, Any]]:
         """List available models."""
@@ -140,17 +165,23 @@ class LlamaFarmBackend:
         model: str = "default",
         temperature: float = 0.7,
         max_tokens: Optional[int] = None,
+        namespace: str = "discoverable",
+        project: Optional[str] = None,
         **kwargs
     ) -> Dict[str, Any]:
         """
         Generate chat completion.
         
-        Uses OpenAI-compatible API format.
+        Uses LlamaFarm project-based API:
+        /v1/projects/{namespace}/{project}/chat/completions
         """
         session = await self._get_session()
         
+        # Use atmosphere-universal project (Universal Runtime)
+        if not project:
+            project = "atmosphere-universal"
+        
         payload = {
-            "model": model,
             "messages": messages,
             "temperature": temperature,
         }
@@ -158,12 +189,16 @@ class LlamaFarmBackend:
         if max_tokens:
             payload["max_tokens"] = max_tokens
         
-        payload.update(kwargs)
+        # Filter out namespace/project from kwargs
+        payload.update({k: v for k, v in kwargs.items() if k not in ("namespace", "project")})
         
-        async with session.post(
-            f"{self.config.base_url}/v1/chat/completions",
-            json=payload
-        ) as resp:
+        # Use project endpoint if we have one
+        if project:
+            url = f"{self.config.base_url}/v1/projects/{namespace}/{project}/chat/completions"
+        else:
+            url = f"{self.config.base_url}/v1/chat/completions"
+        
+        async with session.post(url, json=payload) as resp:
             if resp.status != 200:
                 error = await resp.text()
                 raise RuntimeError(f"Chat completion failed: {error}")
@@ -255,10 +290,17 @@ class LlamaFarmBackend:
     
     async def import_capabilities(self) -> Dict[str, List[str]]:
         """
-        Import capabilities from LlamaFarm projects in the 'Discoverable' namespace.
+        Import capabilities from LlamaFarm projects in the 'discoverable' namespace.
         
-        Only projects explicitly marked as discoverable will be exposed to the mesh.
+        Only projects explicitly in the "discoverable" namespace will be exposed to the mesh.
         Returns a mapping of capability type to list of capability IDs.
+        
+        LlamaFarm project response format:
+        {
+            "namespace": "discoverable",
+            "name": "project-name",
+            "config": { ... }
+        }
         """
         capabilities = {
             "llm": [],
@@ -274,13 +316,26 @@ class LlamaFarmBackend:
             logger.info(f"Found {len(projects)} discoverable LlamaFarm projects")
             
             for project in projects:
-                project_id = project.get("id", "")
-                project_type = project.get("type", "")
-                project_name = project.get("name", project_id)
+                # Project format from LlamaFarm API
+                project_name = project.get("name", "")
+                namespace = project.get("namespace", "")
+                config = project.get("config", {})
+                
+                # Determine capability type from project config
+                # Default to "llm" if not specified
+                project_type = config.get("type", "llm")
+                
+                # Build capability ID: namespace/project_name
+                capability_id = f"{namespace}/{project_name}" if namespace else project_name
                 
                 if project_type in capabilities:
-                    capabilities[project_type].append(project_id)
-                    logger.debug(f"Imported discoverable capability: {project_name} ({project_type})")
+                    capabilities[project_type].append(capability_id)
+                    logger.debug(f"Imported discoverable capability: {capability_id} ({project_type})")
+                else:
+                    # Unknown type, default to llm
+                    capabilities["llm"].append(capability_id)
+                    logger.debug(f"Imported discoverable capability: {capability_id} (default: llm)")
+                    
         except Exception as e:
             logger.warning(f"Failed to import LlamaFarm capabilities: {e}")
         

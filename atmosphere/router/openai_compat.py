@@ -118,6 +118,7 @@ async def proxy_to_llamafarm(
     url = f"{LLAMAFARM_BASE}/v1/projects/{project.namespace}/{project.name}/{endpoint}"
     
     logger.info(f"Routing to LlamaFarm: {url}")
+    print(f"[PROXY] LlamaFarm URL: {url}", flush=True)
     
     async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
         if stream:
@@ -212,16 +213,19 @@ async def chat_completions(request: ChatCompletionRequest):
         )
     
     logger.info(f"Routing '{request.model}' → {result.project.model_path} (score={result.score:.2f}, latency={result.latency_ms:.2f}ms)")
+    print(f"[OPENAI_COMPAT] Routing to project: {result.project.namespace}/{result.project.name}", flush=True)
     
-    # Build payload for LlamaFarm
+    # Build payload for LlamaFarm (exclude None values)
+    # Don't pass model - the project already knows which model to use
     payload = {
-        "model": result.project.models[0] if result.project.models else "default",
         "messages": messages,
         "temperature": request.temperature,
-        "max_tokens": request.max_tokens,
         "stream": request.stream,
     }
     
+    # Only include optional fields if they have values
+    if request.max_tokens is not None:
+        payload["max_tokens"] = request.max_tokens
     if request.top_p is not None:
         payload["top_p"] = request.top_p
     if request.stop:

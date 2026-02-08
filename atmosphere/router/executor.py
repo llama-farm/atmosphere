@@ -239,6 +239,8 @@ class Executor:
         # Try custom handler
         if cap.handler in self._handlers:
             try:
+                # Pass capability label so handler knows which capability was matched
+                kwargs['_capability_label'] = cap.label
                 result = await self._handlers[cap.handler](intent=intent, **kwargs)
                 return ExecutionResult(
                     success=True,
@@ -349,6 +351,38 @@ class Executor:
         temperature = kwargs.get("temperature", 0.7)
         max_tokens = kwargs.get("max_tokens")
         
+        # === INTENT CLASSIFICATION (THE CROWN JEWEL) ===
+        from .intent_classifier import classify_intent
+        classification = None
+        last_user_msg = next(
+            (m.get("content", "") for m in reversed(messages) if m.get("role") == "user"),
+            ""
+        )
+        if last_user_msg:
+            classification = classify_intent(last_user_msg)
+            print(
+                f"🎯 INTENT: {classification.complexity.name} "
+                f"({classification.task_type.value}) → {classification.recommended_model_size}",
+                flush=True
+            )
+        
+        # Build routing info dict to include in response
+        routing_info = None
+        if classification:
+            routing_info = {
+                "complexity": classification.complexity.name,
+                "task_type": classification.task_type.value,
+                "model_size": classification.recommended_model_size,
+                "domain": classification.domain.value if classification.domain else None,
+                "requirements": {
+                    "tools": classification.needs_tools,
+                    "rag": classification.needs_rag,
+                    "vision": classification.needs_vision,
+                    "code": classification.needs_code,
+                },
+                "confidence": classification.confidence
+            }
+        
         # Try LlamaFarm first (more advanced, 26 models)
         if self._llamafarm:
             try:
@@ -358,6 +392,10 @@ class Executor:
                     temperature=temperature,
                     max_tokens=max_tokens
                 )
+                # Inject routing info into result
+                if isinstance(result, dict):
+                    result["_routing"] = routing_info
+                    result["_backend"] = "llamafarm"
                 return ExecutionResult(
                     success=True,
                     data=result,
@@ -371,6 +409,10 @@ class Executor:
         if self._ollama:
             try:
                 result = await self._ollama.chat(messages, model=model)
+                # Inject routing info into result
+                if isinstance(result, dict):
+                    result["_routing"] = routing_info
+                    result["_backend"] = "ollama"
                 return ExecutionResult(
                     success=True,
                     data=result,

@@ -1,16 +1,13 @@
 """
 FastAPI server for Atmosphere.
 """
-import sys
-print("[MODULE] Loading atmosphere.api.server", flush=True)
-sys.stderr.write("[MODULE] Loading atmosphere.api.server (stderr)\n")
-sys.stderr.flush()
 
 import asyncio
 import logging
+import platform
 import time
 from contextlib import asynccontextmanager
-from typing import Optional
+from typing import Optional, Any, Dict, Union
 
 import aiohttp
 from fastapi import FastAPI
@@ -20,16 +17,14 @@ import uvicorn
 from ..config import Config, get_config
 from ..mesh.node import Node, NodeIdentity, MeshIdentity
 from ..router.semantic import SemanticRouter
+from ..router.mesh_router import MeshRouter
 from ..router.executor import Executor
 from ..mesh.gossip import GossipProtocol
 from ..mesh.discovery import MeshDiscovery
 from ..mesh.routing import get_mesh_persistence, SavedMesh
-from ..network.relay import RelayClient
-from ..network.resilient_transport import (
-    ResilientTransportManager,
-    TransportType,
-)
-from ..network.mesh_connection import MeshConnectionManager, MeshConfig
+from ..transport.relay import RelayConnection as RelayClient
+from ..core.gossip import GossipManager
+from ..integration.llamafarm import discover_llamafarm_capabilities
 
 logger = logging.getLogger(__name__)
 
@@ -80,19 +75,21 @@ class AtmosphereServer:
     """
     
     def __init__(self, config: Optional[Config] = None):
-        print("[INIT] AtmosphereServer created", flush=True)
+        logger.debug("AtmosphereServer created")
         self.config = config or get_config()
         
         # Components (initialized in start())
         self.node: Optional[Node] = None
         self.router: Optional[SemanticRouter] = None
+        self.mesh_router: Optional[MeshRouter] = None  # Mesh-aware router
         self.executor: Optional[Executor] = None
-        self.gossip: Optional[GossipProtocol] = None
+        self.gossip: Optional[GossipManager] = None
         self.discovery: Optional[MeshDiscovery] = None
         self.relay_client: Optional[RelayClient] = None
         
-        # Resilient multi-transport mesh connectivity
-        self.mesh_connection: Optional[MeshConnectionManager] = None
+        # BLE transport and pairing (Mac only)
+        self.ble_transport: Optional[Any] = None
+        self.ble_pairing_manager: Optional[Any] = None
         
         self._running = False
         self._relay_task: Optional[asyncio.Task] = None
@@ -143,6 +140,13 @@ class AtmosphereServer:
         self.router = SemanticRouter(node_id=self.node.node_id)
         await self.router.initialize()
         
+        # Initialize mesh-aware router (uses gossip data, latency, cost)
+        self.mesh_router = MeshRouter(
+            semantic_router=self.router,
+            peer_reachability_fn=self._check_peer_reachable,
+            model_info_fn=self._get_model_info,
+        )
+        
         # Register capabilities based on available backends
         await self._register_capabilities()
         
@@ -164,7 +168,7 @@ class AtmosphereServer:
                 port=self.config.server.port,
                 name=self.node.name,
                 mesh_id=mesh.mesh_id if mesh else None,
-                capabilities=list(self.router.local_capabilities.keys())
+                capabilities=list(self.router.local_capability_ids)
             )
         
         logger.info("Atmosphere server initialized")
@@ -232,6 +236,7 @@ class AtmosphereServer:
             payload = {
                 "messages": messages,
                 "temperature": kwargs.get("temperature", 0.7),
+                "rag": kwargs.get("rag", False),  # Disable RAG by default to avoid blocking on Celery
             }
             if kwargs.get("max_tokens"):
                 payload["max_tokens"] = kwargs["max_tokens"]
@@ -277,18 +282,17 @@ class AtmosphereServer:
         # Register LlamaFarm projects using FastProjectRouter for better semantic matching
         # FastProjectRouter scans multiple namespaces and has pre-computed embeddings
         try:
-            print("[LLAMAFARM] Creating FastProjectRouter...", flush=True)
+            logger.debug("Creating FastProjectRouter")
             fast_router = FastProjectRouter()
-            print(f"[LLAMAFARM] Initializing from API: {LLAMAFARM_BASE}", flush=True)
+            logger.debug(f"Initializing from API: {LLAMAFARM_BASE}")
             await fast_router.initialize_from_api(LLAMAFARM_BASE)
-            print(f"[LLAMAFARM] Loaded {len(fast_router.projects)} projects", flush=True)
+            logger.debug(f"Loaded {len(fast_router.projects)} projects")
             
             # Store reference for routing use
             self._fast_router = fast_router
             
             registered_count = 0
             for model_path, project in fast_router.projects.items():
-                print(f"[LLAMAFARM] Processing: {model_path}", flush=True)
                 # Skip test namespaces
                 if project.namespace.startswith("test"):
                     continue
@@ -307,17 +311,12 @@ class AtmosphereServer:
                     handler="llamafarm_project",
                     models=project.models
                 )
-                print(f"[LLAMAFARM] Registered: llamafarm/{project.namespace}/{project.name}", flush=True)
                 registered_count += 1
             
-            print(f"[LLAMAFARM] Registered {registered_count} LlamaFarm projects as capabilities", flush=True)
             logger.info(f"Registered {registered_count} LlamaFarm projects as capabilities (using FastProjectRouter)")
             
         except Exception as e:
-            print(f"[LLAMAFARM] ERROR: {e}", flush=True)
             logger.warning(f"Failed to register LlamaFarm projects: {e}")
-            import traceback
-            traceback.print_exc()
     
     def _get_capability_description(self, capability: str) -> str:
         """Get description for capability embedding."""
@@ -332,11 +331,94 @@ class AtmosphereServer:
         }
         return descriptions.get(capability, f"{capability} capability")
     
+    def _check_peer_reachable(self, peer_id: str) -> bool:
+        """Check if a peer is currently reachable via relay."""
+        # Check relay peers
+        if peer_id in self._relay_peers:
+            return True
+        # Check mDNS discovery
+        if self.discovery:
+            for peer in self.discovery.peers:
+                if peer.node_id == peer_id:
+                    return True
+        return False
+    
+    def _get_model_info(self, capability_id: str) -> dict:
+        """
+        Get model info for a capability (from LlamaFarm config).
+        
+        Returns info like:
+        - has_rag: bool (uses RAG/retrieval)
+        - specializations: list (e.g., ["llama", "camelid"])
+        - size: str (tiny, small, medium, large)
+        - context_length: int
+        """
+        # Parse capability_id to extract project info
+        # Format: node_id:llamafarm/namespace/project
+        parts = capability_id.split(":")
+        if len(parts) < 2:
+            return {}
+        
+        cap_path = parts[1]
+        if not cap_path.startswith("llamafarm/"):
+            return {}
+        
+        # Try to get project config from LlamaFarm
+        try:
+            import httpx
+            llamafarm_url = getattr(self.config, 'llamafarm_url', 'http://localhost:14345')
+            # Extract namespace/project from capability path
+            path_parts = cap_path.replace("llamafarm/", "").split("/")
+            if len(path_parts) >= 2:
+                namespace, project = path_parts[0], path_parts[1]
+                resp = httpx.get(f"{llamafarm_url}/v1/projects/{namespace}/{project}", timeout=2.0)
+                if resp.status_code == 200:
+                    proj = resp.json().get("project", {}).get("config", {})
+                    
+                    # Extract model info from project config
+                    runtime = proj.get("runtime", {})
+                    models = runtime.get("models", [])
+                    default_model = next((m for m in models if m.get("default")), models[0] if models else {})
+                    
+                    # Check for RAG
+                    has_rag = bool(proj.get("rag") or proj.get("retrieval"))
+                    
+                    # Extract specializations from description/topics
+                    specializations = []
+                    desc = proj.get("description", "")
+                    topics = proj.get("topics", [])
+                    if topics:
+                        specializations.extend(topics)
+                    
+                    # Estimate model size from model name
+                    model_name = default_model.get("model", "").lower()
+                    size = "medium"
+                    if any(s in model_name for s in ["1b", "1.5b", "tiny", "mini"]):
+                        size = "tiny"
+                    elif any(s in model_name for s in ["3b", "7b", "small"]):
+                        size = "small"
+                    elif any(s in model_name for s in ["13b", "14b", "20b"]):
+                        size = "medium"
+                    elif any(s in model_name for s in ["30b", "34b", "70b", "large"]):
+                        size = "large"
+                    
+                    return {
+                        "has_rag": has_rag,
+                        "specializations": specializations,
+                        "size": size,
+                        "model": default_model.get("model", ""),
+                        "context_length": default_model.get("context_length", 4096),
+                    }
+        except Exception as e:
+            logger.debug(f"Could not get model info for {capability_id}: {e}")
+        
+        return {}
+    
     async def start(self) -> None:
         """Start the server and all services."""
-        print("[START] Entering start()", flush=True)
+        logger.debug("Starting AtmosphereServer")
         await self.initialize()
-        print("[START] After initialize()", flush=True)
+        logger.debug("Initialization complete")
         
         # Start mDNS discovery
         if self.discovery:
@@ -348,229 +430,215 @@ class AtmosphereServer:
         # Start gossip protocol for capability propagation
         await self._start_gossip()
         
-        # Initialize resilient multi-transport mesh connectivity
-        print("[START] Calling _start_resilient_mesh...", flush=True)
-        await self._start_resilient_mesh()
-        print("[START] _start_resilient_mesh completed", flush=True)
+        # Start BLE transport and pairing (Mac/iOS only)
+        await self._start_ble()
         
         self._running = True
         logger.info(
             f"Atmosphere server running at http://{self.config.server.host}:{self.config.server.port}"
         )
     
+    async def _send_to_relay(self, msg: Dict[str, Any]) -> None:
+        """Send message to relay (used by GossipManager)."""
+        import json
+        print(f"[SEND_TO_RELAY] Called with msg type: {msg.get('type')}", flush=True)
+        if self.relay_client and self.relay_client.connected and self.relay_client.ws:
+            print(f"[SEND_TO_RELAY] Relay connected, sending: {json.dumps(msg)[:200]}", flush=True)
+            await self.relay_client.ws.send(json.dumps(msg))
+            print(f"[SEND_TO_RELAY] Sent successfully", flush=True)
+        else:
+            print(f"[SEND_TO_RELAY] Relay not ready: connected={self.relay_client.connected if self.relay_client else None}, ws={bool(self.relay_client.ws) if self.relay_client else None}", flush=True)
+
     async def _start_gossip(self) -> None:
         """Start the gossip protocol for capability propagation."""
-        from ..mesh.gossip import GossipProtocol, CapabilityInfo
-        from ..network.ip_detect import init_endpoint_registry
-        
+        print(f"[GOSSIP] _start_gossip called, node={self.node}, router={self.router}", flush=True)
         if not self.node or not self.router:
+            print("[GOSSIP] Skipping gossip - no node or router", flush=True)
             logger.debug("No node/router, skipping gossip")
             return
         
-        # Build local capability list for gossip
-        local_caps = []
-        for cap_id, cap in self.router.local_capabilities.items():
-            # Get embedding vector for capability
-            vector = cap.vector.tolist() if hasattr(cap, 'vector') and cap.vector is not None else []
-            local_caps.append(CapabilityInfo(
-                id=cap_id,
-                label=cap.label,
-                description=cap.description,
-                vector=vector,
-                local=True,
-                hops=0,
-                models=cap.models if hasattr(cap, 'models') else []
-            ))
-        
-        # Initialize endpoint registry for dynamic IP propagation
-        relay_base = getattr(self.config, 'relay_url', None)
-        mesh_id = self.node.mesh.mesh_id if self.node.mesh else None
-        endpoint_registry = init_endpoint_registry(
-            node_id=self.node.node_id,
-            port=self.config.server.port,
-            relay_base=relay_base,
-            mesh_id=mesh_id
-        )
-        logger.info(f"Endpoint registry initialized with IPs: {endpoint_registry._my_ips}")
-        
-        # Create gossip protocol with endpoint registry
-        self.gossip = GossipProtocol(
+        print(f"[GOSSIP] Creating GossipManager for node {self.node.node_id}", flush=True)
+        # Create gossip manager
+        self.gossip = GossipManager(
             node_id=self.node.node_id,
             gradient_table=self.router.gradient_table,
-            local_capabilities=local_caps,
-            announce_interval=self.config.gossip_interval or 30,
-            endpoint_registry=endpoint_registry
+            send_to_relay=self._send_to_relay
         )
+        print("[GOSSIP] GossipManager created", flush=True)
         
-        # Set broadcast callback - sends via relay if connected
-        async def broadcast_gossip(node_id: str, data: bytes):
-            """Broadcast gossip message to all connected peers."""
-            import base64
-            import json
-            
-            # Parse the gossip announcement to get capabilities
+        # Discover and register local capabilities from LlamaFarm
+        print("[GOSSIP] Discovering LlamaFarm capabilities...", flush=True)
+        local_capabilities = await discover_llamafarm_capabilities(
+            node_id=self.node.node_id,
+            node_name=self.node.name,
+            llamafarm_url=getattr(self.config, 'llamafarm_url', 'http://localhost:14345'),
+        )
+        print(f"[GOSSIP] Discovered {len(local_capabilities)} capabilities", flush=True)
+        
+        # Fallback to Ollama if LlamaFarm has no capabilities
+        if not local_capabilities:
+            print("[GOSSIP] No LlamaFarm capabilities, checking Ollama...", flush=True)
             try:
-                announcement = json.loads(data.decode())
-            except:
-                announcement = {}
-            
-            # Wrap announcement for relay using broadcast message type
-            # Relay expects: {"type": "broadcast", "payload": {...}}
-            relay_msg = {
-                "type": "broadcast",
-                "payload": {
-                    "type": "gossip",
-                    "node_id": node_id,
-                    "data": base64.b64encode(data).decode(),
-                    "capabilities": [c.get("label", c.get("id", "")) for c in announcement.get("capabilities", [])]
-                }
-            }
-            
-            # Send via relay
-            if self.relay_client and self.relay_client.ws:
-                try:
-                    await self.relay_client.send(relay_msg)
-                    logger.debug(f"Broadcast gossip via relay: {len(announcement.get('capabilities', []))} capabilities")
-                except Exception as e:
-                    logger.debug(f"Relay broadcast failed: {e}")
-            
-            # Also broadcast to mDNS-discovered peers
-            if self.discovery:
-                for peer in self.discovery.peers:
-                    try:
-                        # Direct peer broadcast would go here (e.g. UDP or TCP)
-                        pass
-                    except Exception:
-                        pass
+                import httpx
+                resp = httpx.get("http://localhost:11434/api/tags", timeout=3.0)
+                if resp.status_code == 200:
+                    models = resp.json().get("models", [])
+                    if models:
+                        # Create a generic Ollama capability
+                        from ..core.capability import CapabilityAnnouncement, CapabilityType, ModelTier
+                        ollama_cap = CapabilityAnnouncement(
+                            node_id=self.node.node_id,
+                            node_name=self.node.name,
+                            capability_id=f"{self.node.node_id}:ollama/chat:default",
+                            project_path="ollama/chat",
+                            model_alias="default",
+                            model_actual=models[0].get("name", "llama3.2"),
+                            model_family="llama",
+                            model_params_b=3.0,
+                            model_quantization="Q4_K_M",
+                            model_tier=ModelTier.SMALL,
+                            capability_type=CapabilityType.LLM_CHAT,
+                            label="Ollama Chat",
+                            description="Local Ollama LLM for chat and inference",
+                            keywords=["llm", "chat", "ai", "assistant", "ollama"],
+                            has_streaming=True,
+                        )
+                        local_capabilities.append(ollama_cap)
+                        print(f"[GOSSIP] Added Ollama fallback capability: {ollama_cap.capability_id}", flush=True)
+            except Exception as e:
+                print(f"[GOSSIP] Ollama fallback failed: {e}", flush=True)
         
-        self.gossip.set_broadcast_callback(broadcast_gossip)
+        for capability in local_capabilities:
+            print(f"[GOSSIP] Adding capability: {capability.capability_id}", flush=True)
+            self.gossip.add_local_capability(capability)
         
         # Start gossip loop
+        print("[GOSSIP] Starting gossip broadcast loop...", flush=True)
         await self.gossip.start()
-        logger.info(f"Gossip protocol started with {len(local_caps)} local capabilities")
+        print(f"[GOSSIP] ✅ Gossip started with {len(local_capabilities)} local capabilities", flush=True)
+        logger.info(f"Gossip protocol started with {len(local_capabilities)} local capabilities")
     
-    async def _start_resilient_mesh(self) -> None:
+    async def _start_ble(self) -> None:
         """
-        Start resilient multi-transport mesh connectivity.
+        Start BLE transport and proximity pairing (Mac/iOS only).
         
-        Philosophy: Connect ALL, Use BEST, Failover INSTANT.
-        
-        - Connects via ALL available transports simultaneously (LAN, Relay, BLE, etc.)
-        - Routes messages via best transport (lowest latency + highest reliability)
-        - Instant failover when primary fails (already connected to alternatives)
-        - Continuous health monitoring keeps connections warm
+        Enables:
+        - BLE mesh discovery and messaging
+        - Proximity pairing with tap-to-pair UX
+        - Automatic credential exchange
         """
-        print("[SERVER] _start_resilient_mesh called")
-        if not self.node or not self.node.mesh:
-            print("[SERVER] No mesh configured, skipping resilient mesh")
-            logger.debug("No mesh configured, skipping resilient mesh")
+        print(f"[BLE] _start_ble called, platform={platform.system()}", flush=True)
+        # Only start BLE on supported platforms
+        if platform.system() not in ['Darwin', 'iOS']:
+            print("[BLE] Not on Darwin/iOS, skipping", flush=True)
             return
-        print(f"[SERVER] Node={self.node.node_id}, Mesh={self.node.mesh.mesh_id}")
         
-        relay_url = getattr(self.config, 'relay_url', None)
+        if not self.node:
+            print("[BLE] No node configured, skipping", flush=True)
+            return
         
-        # Create mesh configuration
-        # NOTE: Disable relay in MeshConnectionManager because AtmosphereServer
-        # handles the relay connection separately (with founder registration, token handling, etc.)
-        config = MeshConfig(
-            node_id=self.node.node_id,
-            mesh_id=self.node.mesh.mesh_id,
-            local_host=self.config.server.host,
-            local_port=self.config.server.port,
-            relay_url=relay_url,
-            enable_mdns=self.config.mdns_enabled,
-            enable_relay=False,  # Handled by AtmosphereServer._connect_to_relay()
-            enable_lan=True,
-            enable_ble=False,  # Future
-            enable_wifi_direct=False,  # Future
-            enable_matter=False,  # Future
-        )
-        
-        # Create mesh connection manager
-        self.mesh_connection = MeshConnectionManager(config)
-        
-        # Wire up event handlers
-        def on_peer_discovered(peer_id: str, peer_info: dict):
-            logger.info(f"[RESILIENT] Peer discovered: {peer_id}")
-            # Add to relay_peers for API visibility
-            self._relay_peers[peer_id] = {
-                **peer_info,
-                "via": "resilient_mesh",
-            }
-        
-        def on_peer_connected(peer_id: str):
-            logger.info(f"[RESILIENT] Peer connected: {peer_id}")
-            # Broadcast to local WebSocket clients
-            asyncio.create_task(manager.broadcast({
-                "type": "peer_connected",
-                "peer_id": peer_id,
-                "via": "resilient_mesh",
-            }))
-        
-        def on_peer_disconnected(peer_id: str):
-            logger.info(f"[RESILIENT] Peer disconnected: {peer_id}")
-            asyncio.create_task(manager.broadcast({
-                "type": "peer_disconnected",
-                "peer_id": peer_id,
-            }))
-        
-        def on_message(peer_id: str, message: bytes):
-            logger.debug(f"[RESILIENT] Message from {peer_id}: {len(message)} bytes")
-            # Process gossip or other mesh messages
-            asyncio.create_task(self._handle_resilient_message(peer_id, message))
-        
-        self.mesh_connection.on_peer_discovered(on_peer_discovered)
-        self.mesh_connection.on_peer_connected(on_peer_connected)
-        self.mesh_connection.on_peer_disconnected(on_peer_disconnected)
-        self.mesh_connection.on_message(on_message)
-        
-        # Start the manager
-        await self.mesh_connection.start()
-        
-        # If we have relay peers already discovered, add them to resilient mesh
-        for peer_id, peer_info in list(self._relay_peers.items()):
-            if peer_id != self.node.node_id:
-                await self.mesh_connection.add_peer(peer_id, peer_info)
-        
-        logger.info(f"[RESILIENT] Multi-transport mesh started (LAN={config.enable_lan}, Relay={config.enable_relay})")
-    
-    async def _handle_resilient_message(self, peer_id: str, message: bytes) -> None:
-        """Handle message received via resilient mesh transports."""
+        print(f"[BLE] Starting BLE for node: {self.node.name}", flush=True)
         try:
-            import json
-            data = json.loads(message.decode())
-            msg_type = data.get("type", "")
+            from ..transport.ble_mac import BleTransport
+            print("[BLE] Imported BleTransport", flush=True)
+            from ..transport.ble_pairing import BlePairingManager, PairingCredentials, integrate_pairing_with_transport
             
-            if msg_type == "gossip" and self.gossip:
-                # Handle gossip announcement
-                import base64
-                gossip_data = base64.b64decode(data.get("data", ""))
-                await self.gossip.handle_announcement(gossip_data, peer_id)
-                
-            elif msg_type == "chat_request":
-                # Handle chat request from peer
-                response = await self._handle_relay_chat(data)
-                # Send response back via resilient mesh
-                if self.mesh_connection:
-                    await self.mesh_connection.send(
-                        peer_id, 
-                        json.dumps(response).encode()
-                    )
-                    
-            elif msg_type == "route_request":
-                # Handle route request from peer
-                response = await self._handle_relay_route(data)
-                if self.mesh_connection:
-                    await self.mesh_connection.send(
-                        peer_id,
-                        json.dumps(response).encode()
-                    )
-                    
-            else:
-                logger.debug(f"Unknown resilient message type: {msg_type}")
-                
+            print("[BLE] Creating BleTransport...", flush=True)
+            
+            # Create BLE transport
+            self.ble_transport = BleTransport(
+                node_name=self.node.name,
+                capabilities=list(self.router.local_capability_ids) if self.router else []
+            )
+            
+            # Set message handler
+            def on_ble_message(msg):
+                logger.info(f"BLE message from {msg.source_id}: {len(msg.payload)} bytes")
+                # Handle BLE mesh messages (gossip, chat, etc.)
+                asyncio.create_task(self._handle_resilient_message(msg.source_id, msg.payload))
+            
+            def on_ble_peer_discovered(peer_info):
+                logger.info(f"BLE peer discovered: {peer_info.name} ({peer_info.node_id})")
+                # Broadcast to local WebSocket clients
+                asyncio.create_task(manager.broadcast({
+                    "type": "ble_peer_discovered",
+                    "peer_id": peer_info.node_id,
+                    "name": peer_info.name,
+                    "rssi": peer_info.rssi,
+                    "platform": peer_info.platform,
+                }))
+                # Register BLE peer in mesh
+            
+            self.ble_transport.on_message = on_ble_message
+            self.ble_transport.on_peer_discovered = on_ble_peer_discovered
+            
+            # Build local credentials for pairing
+            local_creds = PairingCredentials(
+                node_id=self.node.node_id,
+                node_name=self.node.name,
+                mesh_id=self.node.mesh.mesh_id if self.node.mesh else "",
+                relay_token="",  # TODO: Get from relay client if connected
+                relay_url=getattr(self.config, 'relay_url', ""),
+                local_endpoints=[{
+                    "ip": self.config.server.host,
+                    "port": self.config.server.port
+                }],
+                capabilities=list(self.router.local_capability_ids) if self.router else []
+            )
+            
+            # Create pairing manager
+            self.ble_pairing_manager = BlePairingManager(
+                local_credentials=local_creds,
+                on_code_display=self._on_pairing_code_display,
+                on_pairing_complete=self._on_pairing_complete,
+                on_pairing_failed=self._on_pairing_failed
+            )
+            
+            # Integrate pairing with transport
+            integrate_pairing_with_transport(self.ble_transport, self.ble_pairing_manager)
+            
+            # Start transport and pairing manager
+            await self.ble_transport.start()
+            self.ble_pairing_manager.start()
+            
+            logger.info(f"✅ BLE transport started: {self.node.name} ({self.ble_transport.node_id})")
+            
+        except ImportError as e:
+            print(f"[BLE] ImportError: {e}", flush=True)
         except Exception as e:
-            logger.error(f"Error handling resilient message: {e}")
+            print(f"[BLE] Exception: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
+    
+    async def _on_pairing_code_display(self, code: str, peer_name: str):
+        """Handle pairing code display (send to UI)."""
+        logger.info(f"🔐 Pairing code: {code} (peer: {peer_name})")
+        # Broadcast to WebSocket clients
+        await manager.broadcast({
+            "event_type": "BLE_PAIRING_CODE",
+            "code": code,
+            "peer_name": peer_name
+        })
+    
+    async def _on_pairing_complete(self, peer_credentials):
+        """Handle successful pairing."""
+        logger.info(f"✅ Pairing complete with {peer_credentials.node_name}")
+        
+        # Broadcast to UI
+        await manager.broadcast({
+            "event_type": "BLE_PAIRING_COMPLETE",
+            "peer_id": peer_credentials.node_id,
+            "peer_name": peer_credentials.node_name
+        })
+    
+    async def _on_pairing_failed(self, peer_id: str, reason: str):
+        """Handle pairing failure."""
+        logger.warning(f"❌ Pairing failed with {peer_id}: {reason}")
+        await manager.broadcast({
+            "event_type": "BLE_PAIRING_FAILED",
+            "peer_id": peer_id,
+            "reason": reason
+        })
     
     async def _connect_to_relay(self) -> None:
         """Connect to relay server for NAT traversal and remote mesh access."""
@@ -595,157 +663,101 @@ class AtmosphereServer:
         mesh_id = mesh.mesh_id
         
         try:
-            # Create relay client using mesh_id as session
-            self.relay_client = RelayClient(relay_url, session_id=mesh_id)
+            # Check if we're the founder (can issue certificates)
+            is_founder = mesh.can_issue_certificates()
+            mesh_public_key = None
+            founder_proof = None
+            node_public_key = None
             
-            if await self.relay_client.connect(timeout=10.0):
-                logger.info(f"Connected to relay: {relay_url}/relay/{mesh_id}")
+            if is_founder:
+                # Get mesh public key (already base64 encoded in MeshIdentity)
+                mesh_public_key = mesh.master_public_key
                 
-                # If founder, register mesh with public key (relay v2.0 security)
-                if self.node.is_founder and hasattr(mesh, 'master_public_key') and mesh.master_public_key:
-                    import base64
-                    
-                    # Create founder proof by signing mesh_id
-                    founder_proof = ""
-                    # Try to use the master keypair if available (founder who created mesh)
-                    # or the local keypair if it was added to the mesh identity
-                    signing_key = getattr(mesh, '_master_keypair', mesh._local_key_pair)
-                    
-                    if signing_key:
-                        try:
-                            sig = signing_key.sign(mesh_id.encode())
-                            founder_proof = base64.b64encode(sig).decode()
-                        except Exception as e:
-                            logger.warning(f"Could not create founder proof: {e}")
-                    
-                    # Ensure public key is string
-                    pub_key = mesh.master_public_key
-                    if isinstance(pub_key, bytes):
-                        pub_key = base64.b64encode(pub_key).decode()
-
-                    # Get node's public key for proof verification
-                    node_pub_key = ""
-                    if signing_key:
-                        node_pub_key = signing_key.public_key_b64()
-                    
-                    # Get capabilities to advertise
-                    caps = list(self.router.local_capabilities.keys()) if self.router else []
-                    # Add generic LLM capability for routing
-                    if caps and "llm" not in caps:
-                        caps.append("llm")
-                    
-                    register_msg = {
-                        "type": "register_mesh",
-                        "mesh_id": mesh_id,
-                        "mesh_public_key": pub_key,
-                        "founder_proof": founder_proof,
-                        "node_id": self.node.node_id,
-                        "name": mesh.name,
-                        "node_public_key": node_pub_key,  # For proof verification
-                        "capabilities": caps  # Include capabilities so relay knows what we can do
-                    }
-                    await self.relay_client.send(register_msg)
-                    logger.info(f"Registered mesh {mesh_id} with relay (founder) with {len(caps)} capabilities")
-                else:
-                    # Non-founder joins with their node info
-                    join_msg = {
-                        "type": "join",
-                        "mesh_id": mesh_id,
-                        "node_id": self.node.node_id,
-                        "node_name": self.node.name,
-                        "capabilities": list(self.router.local_capabilities.keys()) if self.router else []
-                    }
-                    await self.relay_client.send(join_msg)
-                    logger.info(f"Joined mesh {mesh_id} via relay")
+                # Create founder proof: sign mesh_id with our node identity
+                # The identity.sign() method returns base64 already
+                founder_proof = self.node.identity.sign(mesh_id.encode())
                 
-                # Start relay message handler
-                self._relay_task = asyncio.create_task(self._handle_relay_messages())
-            else:
-                logger.warning(f"Failed to connect to relay: {relay_url}")
+                # Get our node public key (identity.public_key is already base64)
+                node_public_key = self.node.identity.public_key
+                
+                print(f"[RELAY] 🔑 Founder registration: mesh_id={mesh_id}, mesh_key={mesh_public_key[:20]}...", flush=True)
+                logger.info(f"Founder connecting to relay with mesh key")
+            
+            # Create relay client with founder credentials if applicable
+            self.relay_client = RelayClient(
+                node_id=self.node.node_id,
+                mesh_id=mesh_id,
+                token="",  # Token handled by mesh registration
+                relay_url=relay_url,
+                on_message=self._on_relay_message,
+                # Founder fields
+                is_founder=is_founder,
+                mesh_public_key=mesh_public_key,
+                founder_proof=founder_proof,
+                node_public_key=node_public_key,
+                mesh_name=mesh.name,
+            )
+            
+            # Start connection in background (non-blocking)
+            await self.relay_client.connect()
+            logger.info(f"Relay connection started: {relay_url}/relay/{mesh_id} (founder={is_founder})")
+            
+            # Note: Registration and message handling will happen in the RelayConnection's
+            # callback when the connection is established
                 
         except Exception as e:
             logger.error(f"Relay connection error: {e}")
     
-    async def _handle_relay_messages(self) -> None:
-        """Handle incoming messages from relay."""
-        if not self.relay_client or not self.relay_client.ws:
-            return
-        
+    async def _on_relay_message(self, msg) -> None:
+        """Handle incoming message from RelayConnection."""
         try:
-            logger.info("Relay message handler started, listening for messages...")
-            
-            # Start ping task to keep connection alive
-            ping_task = asyncio.create_task(self._relay_ping_loop())
-            
-            try:
-                # Use async for which handles closure correctly
-                async for msg in self.relay_client.ws:
-                    if msg.type == aiohttp.WSMsgType.TEXT:
-                        await self._process_relay_message(msg.data)
-                    elif msg.type == aiohttp.WSMsgType.BINARY:
-                        await self._process_relay_message(msg.data.decode())
-                    elif msg.type == aiohttp.WSMsgType.ERROR:
-                        logger.error(f"Relay WebSocket error: {self.relay_client.ws.exception()}")
-                        break
-                    elif msg.type == aiohttp.WSMsgType.CLOSED:
-                        logger.info("Relay connection closed by server")
-                        break
-                
-                logger.warning("Relay message loop exited (connection closed)")
-            finally:
-                ping_task.cancel()
-                try:
-                    await ping_task
-                except asyncio.CancelledError:
-                    pass
-                    
-        except asyncio.CancelledError:
-            logger.debug("Relay handler cancelled")
-            return  # Don't reconnect if cancelled
+            # msg is a RelayMessage object, payload is a dict
+            await self._process_relay_message(msg.payload)
         except Exception as e:
-            logger.error(f"Relay message handler error: {e}", exc_info=True)
-        
-        # Only reconnect if still running
-        if self._running:
-            await self._reconnect_relay()
-            
-    async def _relay_ping_loop(self) -> None:
-        """Send periodic pings to keep relay connection alive."""
-        while True:
-            try:
-                await asyncio.sleep(20)  # Ping every 20 seconds
-                if self.relay_client and self.relay_client.ws and not self.relay_client.ws.closed:
-                    await self.relay_client.send({"type": "ping"})
-                    logger.debug("Sent ping to relay")
-                else:
-                    logger.warning("Relay WS closed during ping loop, breaking")
-                    break
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.warning(f"Ping error (will reconnect): {e}")
-                break
-    
-    async def _process_relay_message(self, data: str) -> None:
+            logger.error(f"Error handling relay message: {e}", exc_info=True)
+
+    async def _process_relay_message(self, data: Union[str, Dict[str, Any]]) -> None:
         """Process a message received from relay."""
         import json
         try:
-            msg = json.loads(data)
+            if isinstance(data, str):
+                msg = json.loads(data)
+            else:
+                msg = data
             msg_type = msg.get("type", "")
             
-            if msg_type == "chat_request" or msg_type == "llm_request":
+            if msg_type == "joined":
+                # We successfully joined the mesh via relay
+                mesh_name = msg.get("mesh", "unknown")
+                node_count = msg.get("node_count", 0)
+                logger.info(f"✓ Joined mesh '{mesh_name}' via relay ({node_count} nodes)")
+                print(f"[RELAY] Joined mesh! Triggering gossip broadcast...", flush=True)
+                
+                # Trigger immediate gossip broadcast now that relay is ready
+                if self.gossip and self.gossip._local_capabilities:
+                    asyncio.create_task(self.gossip.broadcast_capabilities())
+                    print(f"[RELAY] Gossip broadcast triggered ({len(self.gossip._local_capabilities)} capabilities)", flush=True)
+                
+            elif msg_type == "chat_request" or msg_type == "llm_request" or msg_type == "inference_request":
                 # Forward to local LLM (handle both message types)
                 response = await self._handle_relay_chat(msg)
                 if self.relay_client:
-                    # PASS THE DICT, NOT BYTES! RelayClient handles the encoding.
-                    # The relay server expects a TEXT frame, not BINARY.
-                    await self.relay_client.send(response)
+                    # Send response back via broadcast
+                    response["type"] = "llm_response"
+                    await self._send_to_relay({
+                        "type": "broadcast",
+                        "payload": response
+                    })
                     logger.info(f"Sent LLM response back via relay to {msg.get('from', 'unknown')}")
             elif msg_type == "route_request":
                 # Handle routing request
                 response = await self._handle_relay_route(msg)
                 if self.relay_client:
-                    await self.relay_client.send(response)
+                    response["type"] = "route_response"
+                    await self._send_to_relay({
+                        "type": "broadcast", 
+                        "payload": response
+                    })
             elif msg_type == "peer_joined":
                 # A new peer joined the mesh
                 node_id = msg.get("node_id", "unknown")
@@ -755,7 +767,13 @@ class AtmosphereServer:
                 port = msg.get("port", 11451)
                 device_type = msg.get("device_type", "unknown")
                 model = msg.get("model", "")
+                print(f"[PEER] New peer joined: {name} ({node_id})", flush=True)
                 logger.info(f"Peer joined via relay: {name} ({node_id}) with {len(capabilities)} capabilities")
+                
+                # Re-broadcast our capabilities so the new peer sees them
+                if self.gossip and self.gossip._local_capabilities:
+                    print(f"[PEER] Re-broadcasting capabilities to new peer", flush=True)
+                    asyncio.create_task(self.gossip.broadcast_capabilities())
                 
                 # Register device in persistent registry
                 from ..registry.devices import get_device_registry
@@ -790,9 +808,6 @@ class AtmosphereServer:
                 
                 # ADD TO RESILIENT MESH for multi-transport connectivity
                 # This enables: Connect ALL, Use BEST, Failover INSTANT
-                if self.mesh_connection:
-                    await self.mesh_connection.add_peer(node_id, peer_info)
-                    logger.debug(f"Added peer {node_id} to resilient mesh")
                 
                 # Register remote capabilities (non-critical, skip if method missing)
                 for cap in capabilities:
@@ -830,9 +845,6 @@ class AtmosphereServer:
                     del self._relay_peers[node_id]
                 
                 # Remove from resilient mesh
-                if self.mesh_connection:
-                    await self.mesh_connection.transport_manager.disconnect_peer(node_id)
-                    
                 await manager.broadcast({
                     "type": "peer_left", 
                     "node_id": node_id
@@ -858,21 +870,6 @@ class AtmosphereServer:
                         self._relay_peers[node_id] = peer_info
                         
                         # ADD TO RESILIENT MESH for multi-transport
-                        if self.mesh_connection:
-                            await self.mesh_connection.add_peer(node_id, peer_info)
-                        
-                        # Register capabilities (non-critical)
-                        for cap in peer.get("capabilities", []):
-                            if self.router and cap:
-                                try:
-                                    await self.router.register_capability(
-                                        label=f"{node_id}:{cap}",
-                                        description=f"Remote capability '{cap}' from {peer.get('name', node_id[:8])}",
-                                        handler=f"remote:{node_id}"
-                                    )
-                                except Exception as e:
-                                    logger.debug(f"Could not register remote cap: {e}")
-                                
             elif msg_type == "mesh_registered":
                 # Mesh registration confirmed by relay
                 logger.info(f"Mesh registration confirmed by relay: success={msg.get('success')}")
@@ -892,15 +889,43 @@ class AtmosphereServer:
                 payload_type = payload.get("type", "unknown")
                 logger.debug(f"Relay broadcast from {from_node}: {payload_type}")
                 
-                # Handle gossip messages
-                if payload_type == "gossip" and self.gossip:
+                # Handle capability announcements from GossipManager
+                # GossipManager sends: {"type": "broadcast", "payload": {"type": "capability.announce", ...}}
+                if payload_type == "capability.announce" and self.gossip:
+                    try:
+                        await self.gossip.handle_announcement(from_node, payload)
+                        logger.info(f"Processed capability announcement from {from_node} via relay")
+                    except Exception as e:
+                        logger.warning(f"Failed to process capability announcement from {from_node}: {e}")
+                
+                # Handle inference requests forwarded through relay
+                elif payload_type == "inference_request":
+                    logger.info(f"📥 Received inference_request from {from_node} via relay")
+                    print(f"[RELAY] 📥 Inference request from {from_node}", flush=True)
+                    # Process the inference request
+                    response = await self._handle_relay_chat(payload)
+                    if self.relay_client:
+                        # Send response back to the requesting node via broadcast
+                        response["target_node"] = from_node
+                        response["type"] = "llm_response"
+                        await self._send_to_relay({
+                            "type": "broadcast",
+                            "payload": response
+                        })
+                        logger.info(f"✅ Sent inference response to {from_node}")
+                
+                # Also handle legacy "gossip" type for backwards compatibility
+                elif payload_type == "gossip" and self.gossip:
                     import base64
                     try:
                         gossip_data = base64.b64decode(payload.get("data", ""))
-                        await self.gossip.handle_announcement(gossip_data, from_node)
-                        logger.info(f"Processed gossip from {from_node} via relay")
+                        # Legacy format - parse and convert
+                        import json
+                        gossip_dict = json.loads(gossip_data.decode())
+                        await self.gossip.handle_announcement(from_node, gossip_dict)
+                        logger.info(f"Processed legacy gossip from {from_node} via relay")
                     except Exception as e:
-                        logger.warning(f"Failed to process gossip from {from_node}: {e}")
+                        logger.warning(f"Failed to process legacy gossip from {from_node}: {e}")
                 
                 # Forward to local WebSocket clients
                 await manager.broadcast({
@@ -917,9 +942,16 @@ class AtmosphereServer:
         """Handle chat request from relay."""
         try:
             messages = msg.get("messages", [])
+            # Support both "prompt" (string) and "messages" (array) formats
+            prompt = msg.get("prompt", "")
+            if prompt and not messages:
+                messages = [{"role": "user", "content": prompt}]
             model = msg.get("model", "auto")
+            # Default to a known good model if "auto" or empty
+            if model in ("auto", "", "default", None):
+                model = "qwen3:1.7b"  # Fast, good quality default
             request_id = msg.get("request_id", "")
-            from_node = msg.get("from", "")  # Who sent the request
+            from_node = msg.get("from", msg.get("node_id", ""))  # Who sent the request
             
             # Use executor to handle (execute_capability, not execute_chat)
             if self.executor:
@@ -1029,9 +1061,16 @@ class AtmosphereServer:
         
         self._running = False
         
+        # Stop BLE transport and pairing
+        if self.ble_pairing_manager:
+            self.ble_pairing_manager.stop()
+            logger.info("BLE pairing manager stopped")
+        
+        if self.ble_transport:
+            await self.ble_transport.stop()
+            logger.info("BLE transport stopped")
+        
         # Stop resilient mesh
-        if self.mesh_connection:
-            await self.mesh_connection.stop()
             logger.info("Resilient mesh stopped")
         
         # Cancel relay task
@@ -1089,7 +1128,7 @@ class AtmosphereServer:
             "node_name": self.node.name if self.node else None,
             "mesh_id": self.node.mesh.mesh_id if self.node and self.node.mesh else None,
             "mesh_name": self.node.mesh.name if self.node and self.node.mesh else None,
-            "capabilities": list(self.router.local_capabilities.keys()) if self.router else [],
+            "capabilities": list(self.router.local_capability_ids) if self.router else [],
             "peers": {
                 "total": len(all_peer_ids),
                 "mdns": mdns_peer_count,
@@ -1119,9 +1158,14 @@ async def lifespan(app: FastAPI):
     """Application lifespan manager."""
     global _server
     
+    # Import the module to ensure we set _server in the correct namespace
+    # (fixes issue when running as __main__ vs importing)
+    import atmosphere.api.server as server_module
+    
     # Startup
     config = get_config()
     _server = AtmosphereServer(config)
+    server_module._server = _server  # Also set in the imported module namespace
     
     try:
         await _server.start()
@@ -1239,3 +1283,14 @@ def run_server(
 # Create app instance for uvicorn
 app = create_app()
 
+
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description='Run Atmosphere API server')
+    parser.add_argument('--host', default='0.0.0.0', help='Host to bind to')
+    parser.add_argument('--port', type=int, default=11451, help='Port to bind to')
+    parser.add_argument('--reload', action='store_true', help='Enable auto-reload')
+    args = parser.parse_args()
+    
+    run_server(host=args.host, port=args.port, reload=args.reload)

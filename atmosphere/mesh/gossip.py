@@ -25,6 +25,9 @@ logger = logging.getLogger(__name__)
 
 # Protocol constants
 ANNOUNCE_INTERVAL_SEC = 30
+
+# Type for UI event callback (for broadcasting to WebSocket clients)
+UIEventCallback = Callable[[dict], Awaitable[None]]
 MAX_TTL = 10
 MAX_CAPABILITIES_PER_ANNOUNCE = 50
 NONCE_CACHE_SEC = 300
@@ -81,13 +84,19 @@ class ResourceInfo:
     memory_available_mb: int = 0
     gpu_available: float = 0.0
     battery_percent: Optional[int] = None
+    plugged_in: bool = True  # Whether on AC power
+    cpu_load: float = 0.0    # Current CPU load (0-1)
+    memory_percent: float = 0.0  # Current memory usage percent
 
     def to_dict(self) -> dict:
         return {
             "cpu_available": self.cpu_available,
             "memory_available_mb": self.memory_available_mb,
             "gpu_available": self.gpu_available,
-            "battery_percent": self.battery_percent
+            "battery_percent": self.battery_percent,
+            "plugged_in": self.plugged_in,
+            "cpu_load": self.cpu_load,
+            "memory_percent": self.memory_percent
         }
 
     @classmethod
@@ -96,13 +105,52 @@ class ResourceInfo:
             cpu_available=data.get("cpu_available", 1.0),
             memory_available_mb=data.get("memory_available_mb", 0),
             gpu_available=data.get("gpu_available", 0.0),
-            battery_percent=data.get("battery_percent")
+            battery_percent=data.get("battery_percent"),
+            plugged_in=data.get("plugged_in", True),
+            cpu_load=data.get("cpu_load", 0.0),
+            memory_percent=data.get("memory_percent", 0.0)
         )
+    
+    def calculate_cost(self) -> float:
+        """
+        Calculate dynamic routing cost based on resources.
+        Lower cost = more preferred for routing.
+        
+        Factors:
+        - Battery status (unplugged = higher cost)
+        - CPU load (busy = higher cost)
+        - Memory pressure (low = higher cost)
+        """
+        cost = 1.0
+        
+        # Battery factor: unplugged devices cost more
+        if not self.plugged_in:
+            if self.battery_percent is not None:
+                if self.battery_percent < 20:
+                    cost *= 3.0  # Critical battery - avoid
+                elif self.battery_percent < 50:
+                    cost *= 1.5  # Low battery - prefer plugged
+                else:
+                    cost *= 1.2  # On battery but OK
+        
+        # CPU factor: busy devices cost more
+        if self.cpu_load > 0.8:
+            cost *= 2.0  # Very busy
+        elif self.cpu_load > 0.5:
+            cost *= 1.3  # Moderately busy
+        
+        # Memory factor
+        if self.memory_percent > 90:
+            cost *= 1.5  # Memory pressure
+        elif self.memory_percent > 70:
+            cost *= 1.1  # Getting full
+        
+        return round(cost, 2)
 
 
 @dataclass
 class Announcement:
-    """A capability announcement message."""
+    """A capability announcement message with IHAVE/IWANT gossip metadata."""
     type: str = "announce"
     from_node: str = ""
     capabilities: List[CapabilityInfo] = field(default_factory=list)
@@ -111,6 +159,12 @@ class Announcement:
     timestamp: float = field(default_factory=time.time)
     ttl: int = MAX_TTL
     nonce: str = field(default_factory=lambda: uuid.uuid4().hex[:16])
+    
+    # IHAVE/IWANT gossip fields
+    ihave: List[str] = field(default_factory=list)  # Capability IDs this node has
+    iwant: List[str] = field(default_factory=list)  # Capability IDs this node wants
+    node_cost: float = 1.0  # Dynamic routing cost (lower = preferred)
+    transport_type: str = ""  # Transport used: "ble", "lan", "relay"
 
     def to_dict(self) -> dict:
         return {
@@ -121,7 +175,11 @@ class Announcement:
             "endpoints": self.endpoints.to_dict() if self.endpoints else None,
             "timestamp": self.timestamp,
             "ttl": self.ttl,
-            "nonce": self.nonce
+            "nonce": self.nonce,
+            "ihave": self.ihave,
+            "iwant": self.iwant,
+            "node_cost": self.node_cost,
+            "transport_type": self.transport_type
         }
 
     @classmethod
@@ -136,7 +194,11 @@ class Announcement:
             endpoints=EndpointInfo.from_dict(data["endpoints"]) if data.get("endpoints") else None,
             timestamp=data.get("timestamp", time.time()),
             ttl=data.get("ttl", MAX_TTL),
-            nonce=data.get("nonce", "")
+            nonce=data.get("nonce", ""),
+            ihave=data.get("ihave", []),
+            iwant=data.get("iwant", []),
+            node_cost=data.get("node_cost", 1.0),
+            transport_type=data.get("transport_type", "")
         )
 
     def to_json(self) -> str:
@@ -177,6 +239,7 @@ class GossipProtocol:
         self.endpoint_registry = endpoint_registry
 
         self._broadcast_callback: Optional[BroadcastCallback] = None
+        self._ui_event_callback: Optional[UIEventCallback] = None
         self._running = False
         self._task: Optional[asyncio.Task] = None
         self._nonce_cache: Dict[str, float] = {}
@@ -196,28 +259,61 @@ class GossipProtocol:
     def set_broadcast_callback(self, callback: BroadcastCallback) -> None:
         """Set the callback for broadcasting messages to peers."""
         self._broadcast_callback = callback
+    
+    def set_ui_event_callback(self, callback: UIEventCallback) -> None:
+        """Set the callback for broadcasting events to UI clients."""
+        self._ui_event_callback = callback
+    
+    async def _emit_ui_event(self, event: dict) -> None:
+        """Emit an event to UI clients if callback is set."""
+        if self._ui_event_callback:
+            try:
+                await self._ui_event_callback(event)
+            except Exception as e:
+                logger.debug(f"Failed to emit UI event: {e}")
 
     def update_local_capabilities(self, capabilities: List[CapabilityInfo]) -> None:
         """Update the list of local capabilities."""
         self.local_capabilities = capabilities
 
     def get_resource_info(self) -> ResourceInfo:
-        """Get current resource usage."""
+        """Get current resource usage with dynamic cost factors."""
         import psutil
         try:
-            cpu = 1.0 - (psutil.cpu_percent() / 100.0)
-            memory = psutil.virtual_memory().available // (1024 * 1024)
+            cpu_percent = psutil.cpu_percent(interval=None)  # Non-blocking
+            cpu_available = 1.0 - (cpu_percent / 100.0)
+            mem = psutil.virtual_memory()
+            memory_available_mb = mem.available // (1024 * 1024)
+            memory_percent = mem.percent
+            
+            # Get battery status
+            battery_percent = None
+            plugged_in = True
+            try:
+                battery = psutil.sensors_battery()
+                if battery:
+                    battery_percent = int(battery.percent)
+                    plugged_in = battery.power_plugged
+            except Exception:
+                pass  # No battery (desktop)
+            
             return ResourceInfo(
-                cpu_available=cpu,
-                memory_available_mb=memory,
-                gpu_available=0.8
+                cpu_available=cpu_available,
+                memory_available_mb=memory_available_mb,
+                gpu_available=0.8,
+                battery_percent=battery_percent,
+                plugged_in=plugged_in,
+                cpu_load=cpu_percent / 100.0,
+                memory_percent=memory_percent
             )
-        except Exception:
+        except Exception as e:
+            logger.warning(f"Failed to get resource info: {e}")
             return ResourceInfo()
 
-    def build_announcement(self) -> Announcement:
-        """Build an announcement message with capabilities and endpoints."""
+    def build_announcement(self, transport_type: str = "") -> Announcement:
+        """Build an announcement message with capabilities, endpoints, and dynamic cost."""
         capabilities = []
+        ihave_ids = []  # IHAVE: capability IDs we have
 
         for cap in self.local_capabilities[:MAX_CAPABILITIES_PER_ANNOUNCE]:
             capabilities.append(CapabilityInfo(
@@ -230,6 +326,7 @@ class GossipProtocol:
                 models=cap.models,
                 constraints=cap.constraints
             ))
+            ihave_ids.append(cap.id)
 
         remaining_slots = MAX_CAPABILITIES_PER_ANNOUNCE - len(capabilities)
         for entry_dict in self.gradient_table.export_for_gossip(max_hops=5)[:remaining_slots]:
@@ -244,6 +341,7 @@ class GossipProtocol:
                 via=entry.via_node,
                 estimated_latency_ms=entry.estimated_latency_ms
             ))
+            ihave_ids.append(entry.capability_id)
 
         # Get current endpoint info (with refreshed IPs)
         endpoint_info = None
@@ -251,12 +349,20 @@ class GossipProtocol:
             self.endpoint_registry.refresh_my_ips()
             endpoint_info = self.endpoint_registry.get_my_endpoint_info()
 
+        # Calculate dynamic node cost
+        resources = self.get_resource_info()
+        node_cost = resources.calculate_cost()
+
         return Announcement(
             from_node=self.node_id,
             capabilities=capabilities,
-            resources=self.get_resource_info(),
+            resources=resources,
             endpoints=endpoint_info,
-            ttl=MAX_TTL
+            ttl=MAX_TTL,
+            ihave=ihave_ids,
+            iwant=[],  # Can be populated with capability requests
+            node_cost=node_cost,
+            transport_type=transport_type
         )
 
     async def announce(self) -> None:
@@ -270,6 +376,17 @@ class GossipProtocol:
         try:
             await self._broadcast_callback(self.node_id, data)
             self._announcements_sent += 1
+            
+            # Emit UI event for gossip announcement sent
+            await self._emit_ui_event({
+                "type": "gossip_sent",
+                "event": "announcement_sent",
+                "from_node": self.node_id,
+                "capability_count": len(announcement.capabilities),
+                "ttl": announcement.ttl,
+                "node_cost": announcement.node_cost,
+                "timestamp": time.time()
+            })
         except Exception as e:
             logger.error(f"Failed to broadcast announcement: {e}")
 
@@ -292,6 +409,19 @@ class GossipProtocol:
         self._announcements_received += 1
         self._known_nodes[announcement.from_node] = time.time()
 
+        # Emit UI event for gossip announcement received
+        await self._emit_ui_event({
+            "type": "gossip_received",
+            "event": "announcement_received",
+            "from_node": announcement.from_node,
+            "from_peer": from_peer,
+            "capability_count": len(announcement.capabilities),
+            "capabilities": [c.label for c in announcement.capabilities[:10]],
+            "ttl": announcement.ttl,
+            "node_cost": announcement.node_cost,
+            "timestamp": time.time()
+        })
+
         # Update endpoint registry with peer's current IPs
         if announcement.endpoints and self.endpoint_registry:
             if self.endpoint_registry.update_peer(announcement.endpoints):
@@ -303,6 +433,16 @@ class GossipProtocol:
         if route_updates > 0:
             self._route_updates += route_updates
             logger.debug(f"Routing table: {route_updates} route updates from {announcement.from_node}")
+            
+            # Emit UI event for routing table updates
+            await self._emit_ui_event({
+                "type": "routing_update",
+                "event": "routes_updated",
+                "from_node": announcement.from_node,
+                "updates": route_updates,
+                "total_routes": len(self.routing_table.routes),
+                "timestamp": time.time()
+            })
 
         updates = 0
         for cap in announcement.capabilities:
@@ -400,6 +540,10 @@ class GossipProtocol:
 
     def stats(self) -> dict:
         """Get gossip protocol statistics."""
+        # Calculate current node cost
+        resources = self.get_resource_info()
+        node_cost = resources.calculate_cost()
+        
         stats = {
             "announcements_sent": self._announcements_sent,
             "announcements_received": self._announcements_received,
@@ -407,7 +551,14 @@ class GossipProtocol:
             "endpoint_updates": self._endpoint_updates,
             "route_updates": self._route_updates,
             "known_nodes": len(self.known_nodes()),
-            "gradient_table_size": len(self.gradient_table)
+            "gradient_table_size": len(self.gradient_table),
+            "node_cost": node_cost,
+            "cost_factors": {
+                "cpu_load": resources.cpu_load,
+                "memory_percent": resources.memory_percent,
+                "battery_percent": resources.battery_percent,
+                "plugged_in": resources.plugged_in
+            }
         }
         
         # Add routing table stats

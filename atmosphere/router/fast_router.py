@@ -15,10 +15,13 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 import time
+from collections import Counter
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 import os
 
 import numpy as np
@@ -49,6 +52,8 @@ class ProjectEntry:
     models: List[str]
     nodes: List[str]  # Which nodes have this project
     embedding: Optional[np.ndarray] = None  # Pre-computed embedding
+    hash_embedding: Optional[np.ndarray] = None  # Hash-based embedding for fallback
+    keywords: Set[str] = field(default_factory=set)  # Extracted keywords for fallback
     
     @property
     def model_path(self) -> str:
@@ -72,7 +77,8 @@ class ProjectEntry:
             "description": self.description,
             "models": self.models,
             "nodes": self.nodes,
-            "embedding": self.embedding.tolist() if self.embedding is not None else None
+            "embedding": self.embedding.tolist() if self.embedding is not None else None,
+            "keywords": list(self.keywords) if self.keywords else [],
         }
     
     @classmethod
@@ -80,6 +86,7 @@ class ProjectEntry:
         embedding = None
         if data.get("embedding"):
             embedding = np.array(data["embedding"], dtype=np.float32)
+        keywords = set(data.get("keywords", []))
         return cls(
             namespace=data["namespace"],
             name=data["name"],
@@ -89,8 +96,18 @@ class ProjectEntry:
             description=data.get("description", ""),
             models=data.get("models", ["default"]),
             nodes=data.get("nodes", []),
-            embedding=embedding
+            embedding=embedding,
+            keywords=keywords,
         )
+
+
+class MatchTier(Enum):
+    """Which cascade tier produced the match."""
+    EXPLICIT = "explicit"      # Exact model path or name match
+    EMBEDDING = "embedding"    # Neural embedding similarity
+    HASH = "hash"              # Hash-based embedding similarity  
+    KEYWORD = "keyword"        # Keyword overlap
+    FALLBACK = "fallback"      # Default project
 
 
 @dataclass
@@ -101,10 +118,47 @@ class RouteResult:
     reason: str
     latency_ms: float = 0.0
     fallback: bool = False
+    tier: MatchTier = MatchTier.FALLBACK  # Which cascade tier matched
     
     @property
     def success(self) -> bool:
         return self.project is not None
+
+
+class KeywordMatcher:
+    """
+    Keyword extractor and matcher for fallback routing.
+    """
+    
+    STOPWORDS = frozenset([
+        "a", "an", "the", "and", "or", "but", "in", "on", "at", "to", "for",
+        "of", "with", "by", "from", "as", "is", "was", "are", "were", "be",
+        "been", "being", "have", "has", "had", "do", "does", "did", "will",
+        "would", "could", "should", "may", "might", "must", "shall", "can",
+        "this", "that", "these", "those", "i", "you", "he", "she", "it", "we",
+        "they", "what", "which", "who", "whom", "how", "when", "where", "why",
+        "all", "each", "every", "both", "few", "more", "most", "other", "some",
+        "such", "no", "not", "only", "same", "so", "than", "too", "very", "just",
+    ])
+    
+    @classmethod
+    def extract(cls, text: str, max_keywords: int = 20) -> Set[str]:
+        """Extract keywords from text."""
+        if not text:
+            return set()
+        words = re.findall(r'\b[a-zA-Z]{3,}\b', text.lower())
+        keywords = [w for w in words if w not in cls.STOPWORDS]
+        counts = Counter(keywords)
+        return set(kw for kw, _ in counts.most_common(max_keywords))
+    
+    @classmethod
+    def match_score(cls, query_kw: Set[str], target_kw: Set[str]) -> float:
+        """Jaccard-like keyword match score."""
+        if not query_kw or not target_kw:
+            return 0.0
+        intersection = len(query_kw & target_kw)
+        union = len(query_kw | target_kw)
+        return intersection / union if union > 0 else 0.0
 
 
 class FastEmbedder:
@@ -129,12 +183,21 @@ class FastEmbedder:
             logger.warning("sentence-transformers not available, using hash-based fallback")
             self._use_fallback = True
     
+    @property
+    def using_neural(self) -> bool:
+        """Whether neural embeddings are available."""
+        return self._model is not None
+    
     def embed(self, text: str) -> np.ndarray:
         """Embed a single text. Fast, synchronous."""
         if self._model is not None:
             return self._model.encode(text, normalize_embeddings=True)
         else:
             return self._hash_embed(text)
+    
+    def embed_hash(self, text: str) -> np.ndarray:
+        """Always use hash embedding (for fallback tier)."""
+        return self._hash_embed(text)
     
     def embed_batch(self, texts: List[str]) -> np.ndarray:
         """Embed multiple texts. Returns (N, dim) array."""
@@ -205,14 +268,16 @@ class FastProjectRouter:
         self._capability_index: Dict[str, List[str]] = {}  # cap -> [paths]
         
         # Keyword boost vectors (pre-computed)
+        # Note: Keys must match domain values returned by APIDiscovery
         self._domain_keywords: Dict[str, List[str]] = {
-            "animals/camelids": ["llama", "alpaca", "camelid", "fiber", "husbandry", "breeding", "shearing"],
+            "camelids": ["llama", "alpaca", "camelid", "fiber", "husbandry", "breeding", "shearing", "llamas", "alpacas"],
+            "animals/camelids": ["llama", "alpaca", "camelid", "fiber", "husbandry", "breeding", "shearing", "llamas", "alpacas"],  # Legacy alias
             "fishing": ["fish", "fishing", "tackle", "lure", "bass", "trout", "rod", "reel", "bait"],
             "healthcare": ["medical", "health", "doctor", "patient", "diagnosis", "treatment", "clinical", "symptom"],
             "legal": ["legal", "law", "attorney", "contract", "court", "liability", "lawsuit"],
             "finance": ["finance", "money", "investment", "trading", "stock", "portfolio", "market"],
             "coding": ["code", "programming", "software", "developer", "api", "function", "debug", "python"],
-            "infrastructure": ["config", "discovery", "deploy", "server", "devops", "kubernetes"]
+            "infrastructure": ["config", "discovery", "deploy", "server", "devops", "kubernetes", "sre", "ops"]
         }
         
         self._embedder: Optional[FastEmbedder] = None
@@ -289,13 +354,10 @@ class FastProjectRouter:
         
         try:
             discovery = APIDiscovery(llamafarm_url, node_id=self.node_id)
-            discovered = await discovery.discover()
+            # ONLY discover projects from the 'discoverable' namespace
+            discovered = await discovery.discover_namespace("discoverable")
             
             for disc_proj in discovered:
-                # Skip test projects
-                if disc_proj.namespace.startswith("test-"):
-                    continue
-                
                 entry = ProjectEntry(
                     namespace=disc_proj.namespace,
                     name=disc_proj.name,
@@ -325,20 +387,28 @@ class FastProjectRouter:
                         self._capability_index[cap] = []
                     self._capability_index[cap].append(entry.model_path)
             
-            # Set default
-            if "default/default-project" in self.projects:
-                self._default_project = self.projects["default/default-project"]
-            elif self._domain_index.get("general"):
-                path = self._domain_index["general"][0]
-                self._default_project = self.projects[path]
-            elif self.projects:
-                self._default_project = list(self.projects.values())[0]
+            # Set default - prefer atmosphere-universal or projects with "universal" in name
+            if "discoverable/atmosphere-universal" in self.projects:
+                self._default_project = self.projects["discoverable/atmosphere-universal"]
+            else:
+                # Find first project with "universal" or "atmosphere" in name
+                for path, entry in self.projects.items():
+                    if "universal" in entry.name.lower() or "atmosphere" in entry.name.lower():
+                        self._default_project = entry
+                        break
+                else:
+                    if self.projects:
+                        self._default_project = list(self.projects.values())[0]
             
-            logger.info(f"Loaded {len(self.projects)} projects from API")
+            logger.info(f"Loaded {len(self.projects)} projects from 'discoverable' namespace via API")
+            print(f"[FAST_ROUTER] Default project set to: {self._default_project.model_path if self._default_project else 'None'}", flush=True)
+            print(f"[FAST_ROUTER] Available projects: {list(self.projects.keys())}", flush=True)
             
         except Exception as e:
-            logger.error(f"Failed to load from API: {e}, falling back to registry")
-            self._load_registry()
+            logger.error(f"Failed to load from API: {e}")
+            # In 'discoverable-only' mode, we don't fall back to local registry
+            # as that might contain private projects.
+            self.projects = {}
     
     def _load_registry(self) -> None:
         """Load project registry from disk."""
@@ -393,18 +463,28 @@ class FastProjectRouter:
                     self._capability_index[cap] = []
                 self._capability_index[cap].append(entry.model_path)
         
-        # Set default
-        if "default/default-project" in self.projects:
-            self._default_project = self.projects["default/default-project"]
-        elif self._domain_index.get("general"):
-            path = self._domain_index["general"][0]
-            self._default_project = self.projects[path]
-        elif self.projects:
-            self._default_project = list(self.projects.values())[0]
+        # Set default - prefer atmosphere-universal or projects with "universal" in name
+        if "discoverable/atmosphere-universal" in self.projects:
+            self._default_project = self.projects["discoverable/atmosphere-universal"]
+        else:
+            # Find first project with "universal" or "atmosphere" in name
+            for path, entry in self.projects.items():
+                if "universal" in entry.name.lower() or "atmosphere" in entry.name.lower():
+                    self._default_project = entry
+                    break
+            else:
+                # Fallback chain
+                if "default/default-project" in self.projects:
+                    self._default_project = self.projects["default/default-project"]
+                elif self._domain_index.get("general"):
+                    path = self._domain_index["general"][0]
+                    self._default_project = self.projects[path]
+                elif self.projects:
+                    self._default_project = list(self.projects.values())[0]
     
     def _compute_embeddings(self) -> None:
-        """Compute embeddings for all projects."""
-        logger.info("Computing project embeddings...")
+        """Compute embeddings and extract keywords for all projects."""
+        logger.info("Computing project embeddings and keywords...")
         
         for path, project in self.projects.items():
             # Build text to embed: combine domain, topics, description
@@ -416,7 +496,14 @@ class FastProjectRouter:
             ]
             text = " ".join(text_parts)
             
+            # Primary embedding (neural or hash depending on availability)
             project.embedding = self._embedder.embed(text)
+            
+            # Hash embedding (always computed for fallback tier)
+            project.hash_embedding = self._embedder.embed_hash(text)
+            
+            # Extract keywords for keyword fallback tier
+            project.keywords = KeywordMatcher.extract(text)
     
     def _build_embedding_matrix(self) -> None:
         """Build numpy matrix for fast batch similarity."""
@@ -453,18 +540,56 @@ class FastProjectRouter:
                 logger.info("Cache outdated, will recompute embeddings")
                 return False
             
+            # Load optional hash embeddings and keywords if present
+            cache_hash_embeddings = data.get("hash_embeddings", None)
+            cache_keywords = data.get("keywords", None)
+            
             # Apply cached embeddings
             for i, path in enumerate(cache_paths):
                 if path in self.projects:
                     self.projects[path].embedding = cache_embeddings[i]
+                    # Also load hash embeddings if cached
+                    if cache_hash_embeddings is not None:
+                        self.projects[path].hash_embedding = cache_hash_embeddings[i]
+                    # Also load keywords if cached
+                    if cache_keywords is not None:
+                        kw = cache_keywords[i]
+                        self.projects[path].keywords = set(kw) if isinstance(kw, (list, np.ndarray)) else set()
+            
+            # If hash embeddings or keywords weren't cached, recompute them
+            needs_recompute = cache_hash_embeddings is None or cache_keywords is None
+            if needs_recompute:
+                logger.info("Cache missing hash embeddings or keywords, computing...")
+                self._compute_hash_and_keywords()
+                self._save_embedding_cache()  # Save updated cache
             
             return True
         except Exception as e:
             logger.warning(f"Failed to load embedding cache: {e}")
             return False
     
+    def _compute_hash_and_keywords(self) -> None:
+        """Compute only hash embeddings and keywords (when primary embeddings from cache)."""
+        for path, project in self.projects.items():
+            # Build text to embed: combine domain, topics, description
+            text_parts = [
+                project.domain,
+                " ".join(project.topics),
+                project.description[:500] if project.description else "",
+                project.name.replace("-", " ").replace("_", " ")
+            ]
+            text = " ".join(text_parts)
+            
+            # Hash embedding (always computed for fallback tier)
+            if project.hash_embedding is None:
+                project.hash_embedding = self._embedder.embed_hash(text)
+            
+            # Extract keywords for keyword fallback tier
+            if not project.keywords:
+                project.keywords = KeywordMatcher.extract(text)
+    
     def _save_embedding_cache(self) -> None:
-        """Save embeddings to cache."""
+        """Save embeddings, hash embeddings, and keywords to cache."""
         try:
             self.cache_path.parent.mkdir(parents=True, exist_ok=True)
             
@@ -473,21 +598,47 @@ class FastProjectRouter:
                 self.projects[p].embedding for p in paths
             ], dtype=np.float32)
             
-            np.savez(self.cache_path, paths=np.array(paths), embeddings=embeddings)
+            # Also save hash embeddings
+            hash_embeddings = np.array([
+                self.projects[p].hash_embedding if self.projects[p].hash_embedding is not None 
+                else np.zeros(self._embedder.dimension, dtype=np.float32)
+                for p in paths
+            ], dtype=np.float32)
+            
+            # Save keywords as list of lists (numpy can't directly store sets)
+            keywords = np.array([
+                list(self.projects[p].keywords) if self.projects[p].keywords else []
+                for p in paths
+            ], dtype=object)
+            
+            np.savez(
+                self.cache_path, 
+                paths=np.array(paths), 
+                embeddings=embeddings,
+                hash_embeddings=hash_embeddings,
+                keywords=keywords
+            )
             logger.info(f"Saved embedding cache to {self.cache_path}")
         except Exception as e:
             logger.warning(f"Failed to save embedding cache: {e}")
     
     def route(self, model: str, messages: Optional[List[Dict]] = None) -> RouteResult:
         """
-        Route a request. FAST - no LLM calls.
+        Route a request using cascade. FAST - no LLM calls.
+        
+        Cascade order:
+        1. EXPLICIT: Exact model path or project name match
+        2. EMBEDDING: Neural/hash embedding similarity
+        3. HASH: Hash-based fallback (if neural available)
+        4. KEYWORD: Pure keyword matching
+        5. FALLBACK: Default project
         
         Args:
             model: Model identifier or "auto"/"default" for semantic routing
             messages: Chat messages for content-based routing
         
         Returns:
-            RouteResult with selected project
+            RouteResult with selected project and cascade tier
         """
         if not self._initialized:
             self.initialize()
@@ -501,7 +652,8 @@ class FastProjectRouter:
                 project=self.projects[model],
                 score=1.0,
                 reason="Explicit model path",
-                latency_ms=elapsed
+                latency_ms=elapsed,
+                tier=MatchTier.EXPLICIT,
             )
         
         # 2. Check project name only
@@ -512,10 +664,11 @@ class FastProjectRouter:
                     project=project,
                     score=0.95,
                     reason=f"Project name match ({project.namespace})",
-                    latency_ms=elapsed
+                    latency_ms=elapsed,
+                    tier=MatchTier.EXPLICIT,
                 )
         
-        # 3. Content-based semantic routing
+        # 3. Content-based cascade routing
         if messages and model in ("auto", "default", ""):
             return self._route_by_content(messages, start)
         
@@ -526,19 +679,25 @@ class FastProjectRouter:
             score=0.0,
             reason=f"Fallback (no match for: {model})",
             latency_ms=elapsed,
-            fallback=True
+            fallback=True,
+            tier=MatchTier.FALLBACK,
         )
     
     def _route_by_content(self, messages: List[Dict], start: float) -> RouteResult:
         """
-        Fast content-based routing using pre-computed embeddings.
+        Fast content-based routing using 3-tier cascade.
         
-        1. Extract user message
-        2. Quick keyword check for domain boost
-        3. Embed prompt
-        4. Cosine similarity against all projects
-        5. Return best match
+        Cascade:
+        1. EMBEDDING: Neural/hash embedding similarity (threshold: 0.5)
+        2. HASH: Explicit hash-based similarity if neural used (threshold: 0.35)
+        3. KEYWORD: Pure keyword matching (threshold: 0.2)
+        4. FALLBACK: Default project with domain boost
         """
+        # Thresholds for cascade tiers
+        EMBEDDING_THRESHOLD = 0.5
+        HASH_THRESHOLD = 0.35
+        KEYWORD_THRESHOLD = 0.2
+        
         # Extract last user message
         content = ""
         for msg in reversed(messages):
@@ -553,61 +712,121 @@ class FastProjectRouter:
                 score=0.0,
                 reason="No user content",
                 latency_ms=elapsed,
-                fallback=True
+                fallback=True,
+                tier=MatchTier.FALLBACK,
             )
         
-        # Quick keyword domain detection (very fast)
+        # Pre-compute all content features
+        prompt_embedding = self._embedder.embed(content)
+        prompt_hash_embedding = self._embedder.embed_hash(content)
+        prompt_keywords = KeywordMatcher.extract(content)
+        
+        # Quick keyword domain detection for boosting
         domain_scores: Dict[str, float] = {}
         for domain, keywords in self._domain_keywords.items():
             score = sum(1.0 for kw in keywords if kw in content)
             if score > 0:
                 domain_scores[domain] = score
         
-        # Embed the prompt
-        prompt_embedding = self._embedder.embed(content)
-        
-        # Compute similarity against all projects (fast matrix multiply)
+        # === CASCADE TIER 1: Embedding Match ===
         if self._embedding_matrix is not None and len(self._embedding_matrix) > 0:
             similarities = self._embedding_matrix @ prompt_embedding
-        else:
-            similarities = np.array([])
-        
-        # Boost scores for keyword-matched domains
-        boosted_scores = similarities.copy()
-        for i, path in enumerate(self._project_paths):
-            project = self.projects[path]
-            if project.domain in domain_scores:
-                boosted_scores[i] += domain_scores[project.domain] * 0.1
-        
-        # Find best match
-        if len(boosted_scores) > 0:
+            
+            # Boost scores for keyword-matched domains
+            boosted_scores = similarities.copy()
+            for i, path in enumerate(self._project_paths):
+                project = self.projects[path]
+                if project.domain in domain_scores:
+                    boosted_scores[i] += domain_scores[project.domain] * 0.1
+            
             best_idx = np.argmax(boosted_scores)
             best_score = float(boosted_scores[best_idx])
-            best_path = self._project_paths[best_idx]
-            best_project = self.projects[best_path]
             
-            # Determine reason
-            if best_project.domain in domain_scores:
-                reason = f"Domain match ({best_project.domain}) + semantic"
-            else:
-                reason = "Semantic similarity"
+            if best_score >= EMBEDDING_THRESHOLD:
+                best_project = self.projects[self._project_paths[best_idx]]
+                elapsed = (time.perf_counter() - start) * 1000
+                tier = MatchTier.EMBEDDING if self._embedder.using_neural else MatchTier.HASH
+                reason = f"{'Embedding' if self._embedder.using_neural else 'Hash'} match ({best_project.domain})"
+                return RouteResult(
+                    project=best_project,
+                    score=min(best_score, 1.0),
+                    reason=reason,
+                    latency_ms=elapsed,
+                    fallback=False,
+                    tier=tier,
+                )
+        
+        # === CASCADE TIER 2: Hash Match (if neural embeddings were used in tier 1) ===
+        if self._embedder.using_neural:
+            best_hash_score = 0.0
+            best_hash_project = None
             
+            for path, project in self.projects.items():
+                if project.hash_embedding is not None:
+                    score = float(np.dot(prompt_hash_embedding, project.hash_embedding))
+                    # Boost for domain match
+                    if project.domain in domain_scores:
+                        score += domain_scores[project.domain] * 0.1
+                    if score > best_hash_score:
+                        best_hash_score = score
+                        best_hash_project = project
+            
+            if best_hash_project and best_hash_score >= HASH_THRESHOLD:
+                elapsed = (time.perf_counter() - start) * 1000
+                return RouteResult(
+                    project=best_hash_project,
+                    score=min(best_hash_score, 1.0),
+                    reason=f"Hash fallback ({best_hash_project.domain})",
+                    latency_ms=elapsed,
+                    fallback=False,
+                    tier=MatchTier.HASH,
+                )
+        
+        # === CASCADE TIER 3: Keyword Match ===
+        best_kw_score = 0.0
+        best_kw_project = None
+        
+        for path, project in self.projects.items():
+            score = KeywordMatcher.match_score(prompt_keywords, project.keywords)
+            # Boost for domain match
+            if project.domain in domain_scores:
+                score += domain_scores[project.domain] * 0.15
+            if score > best_kw_score:
+                best_kw_score = score
+                best_kw_project = project
+        
+        if best_kw_project and best_kw_score >= KEYWORD_THRESHOLD:
             elapsed = (time.perf_counter() - start) * 1000
             return RouteResult(
-                project=best_project,
-                score=min(best_score, 1.0),
-                reason=reason,
+                project=best_kw_project,
+                score=min(best_kw_score, 1.0),
+                reason=f"Keyword fallback ({best_kw_project.domain})",
                 latency_ms=elapsed,
-                fallback=best_score < 0.3
+                fallback=False,
+                tier=MatchTier.KEYWORD,
             )
+        
+        # === TIER 4: Final Fallback ===
+        # Use best from any tier, or domain-boosted default
+        best_project = self._default_project
+        best_reason = "Default fallback"
+        
+        # If we had domain matches, prefer a project from that domain
+        if domain_scores:
+            top_domain = max(domain_scores, key=domain_scores.get)
+            if top_domain in self._domain_index:
+                domain_path = self._domain_index[top_domain][0]
+                best_project = self.projects[domain_path]
+                best_reason = f"Domain fallback ({top_domain})"
         
         elapsed = (time.perf_counter() - start) * 1000
         return RouteResult(
-            project=self._default_project,
+            project=best_project,
             score=0.0,
-            reason="No matches",
+            reason=best_reason,
             latency_ms=elapsed,
-            fallback=True
+            fallback=True,
+            tier=MatchTier.FALLBACK,
         )
     
     # ============ Gossip Integration ============
@@ -639,10 +858,20 @@ class FastProjectRouter:
         elif action in ("add", "update"):
             entry = ProjectEntry.from_dict(project_data)
             
+            # Build text for embeddings and keywords
+            text = f"{entry.domain} {' '.join(entry.topics)} {entry.description}"
+            
             # Compute embedding if not provided
             if entry.embedding is None and self._embedder:
-                text = f"{entry.domain} {' '.join(entry.topics)} {entry.description}"
                 entry.embedding = self._embedder.embed(text)
+            
+            # Always compute hash embedding for fallback tier
+            if entry.hash_embedding is None and self._embedder:
+                entry.hash_embedding = self._embedder.embed_hash(text)
+            
+            # Extract keywords if not provided
+            if not entry.keywords:
+                entry.keywords = KeywordMatcher.extract(text)
             
             # Update or add
             existing = self.projects.get(entry.model_path)
@@ -734,6 +963,113 @@ class FastProjectRouter:
         """Get the LlamaFarm API URL for a project."""
         return f"{LLAMAFARM_BASE}/v1/projects/{project.namespace}/{project.name}/{endpoint}"
 
+    def test_cascade(self, content: str) -> Dict[str, Any]:
+        """
+        Test all cascade tiers for a given content.
+        
+        Useful for debugging and understanding routing decisions.
+        
+        Returns dict with results from each tier.
+        """
+        if not self._initialized:
+            self.initialize()
+        
+        # Thresholds
+        EMBEDDING_THRESHOLD = 0.5
+        HASH_THRESHOLD = 0.35
+        KEYWORD_THRESHOLD = 0.2
+        
+        content = content.lower()
+        
+        # Compute all features
+        prompt_embedding = self._embedder.embed(content)
+        prompt_hash_embedding = self._embedder.embed_hash(content)
+        prompt_keywords = KeywordMatcher.extract(content)
+        
+        # Domain detection
+        domain_scores: Dict[str, float] = {}
+        for domain, keywords in self._domain_keywords.items():
+            score = sum(1.0 for kw in keywords if kw in content)
+            if score > 0:
+                domain_scores[domain] = score
+        
+        results = {
+            "content": content[:100] + "..." if len(content) > 100 else content,
+            "keywords": list(prompt_keywords),
+            "domain_boosts": domain_scores,
+            "neural_available": self._embedder.using_neural,
+            "tiers": {},
+        }
+        
+        # Tier 1: Embedding
+        if self._embedding_matrix is not None and len(self._embedding_matrix) > 0:
+            similarities = self._embedding_matrix @ prompt_embedding
+            boosted = similarities.copy()
+            for i, path in enumerate(self._project_paths):
+                if self.projects[path].domain in domain_scores:
+                    boosted[i] += domain_scores[self.projects[path].domain] * 0.1
+            
+            best_idx = np.argmax(boosted)
+            best_score = float(boosted[best_idx])
+            best_project = self.projects[self._project_paths[best_idx]]
+            
+            results["tiers"]["embedding"] = {
+                "score": best_score,
+                "threshold": EMBEDDING_THRESHOLD,
+                "passed": best_score >= EMBEDDING_THRESHOLD,
+                "project": best_project.model_path,
+                "domain": best_project.domain,
+            }
+        
+        # Tier 2: Hash (separate computation)
+        best_hash = {"score": 0.0, "project": None, "domain": None}
+        for path, project in self.projects.items():
+            if project.hash_embedding is not None:
+                score = float(np.dot(prompt_hash_embedding, project.hash_embedding))
+                if project.domain in domain_scores:
+                    score += domain_scores[project.domain] * 0.1
+                if score > best_hash["score"]:
+                    best_hash = {"score": score, "project": path, "domain": project.domain}
+        
+        results["tiers"]["hash"] = {
+            "score": best_hash["score"],
+            "threshold": HASH_THRESHOLD,
+            "passed": best_hash["score"] >= HASH_THRESHOLD,
+            "project": best_hash["project"],
+            "domain": best_hash["domain"],
+        }
+        
+        # Tier 3: Keyword
+        best_kw = {"score": 0.0, "project": None, "domain": None}
+        for path, project in self.projects.items():
+            score = KeywordMatcher.match_score(prompt_keywords, project.keywords)
+            if project.domain in domain_scores:
+                score += domain_scores[project.domain] * 0.15
+            if score > best_kw["score"]:
+                best_kw = {"score": score, "project": path, "domain": project.domain}
+        
+        results["tiers"]["keyword"] = {
+            "score": best_kw["score"],
+            "threshold": KEYWORD_THRESHOLD,
+            "passed": best_kw["score"] >= KEYWORD_THRESHOLD,
+            "project": best_kw["project"],
+            "domain": best_kw["domain"],
+        }
+        
+        # Final route result
+        messages = [{"role": "user", "content": content}]
+        final = self.route("auto", messages)
+        results["final"] = {
+            "tier": final.tier.value,
+            "score": final.score,
+            "project": final.project.model_path if final.project else None,
+            "domain": final.project.domain if final.project else None,
+            "reason": final.reason,
+            "fallback": final.fallback,
+        }
+        
+        return results
+
 
 # ============ Singleton ============
 
@@ -741,9 +1077,60 @@ _router: Optional[FastProjectRouter] = None
 
 
 def get_fast_router() -> FastProjectRouter:
-    """Get or create the singleton fast router."""
+    """Get or create the singleton fast router, preferring API discovery."""
     global _router
     if _router is None:
         _router = FastProjectRouter()
-        _router.initialize()
+        
+        # Try sync API load first (preferred - gets live LlamaFarm projects)
+        try:
+            import httpx
+            
+            # Initialize embedder first
+            _router._embedder = FastEmbedder()
+            _router._embedder.initialize()
+            
+            resp = httpx.get(f"{LLAMAFARM_BASE}/v1/projects/discoverable", timeout=5.0)
+            if resp.status_code == 200:
+                data = resp.json()
+                projects = data.get("projects", [])
+                
+                for proj in projects:
+                    cfg = proj.get("config", {})
+                    runtime = cfg.get("runtime", {})
+                    models_cfg = runtime.get("models", [])
+                    
+                    entry = ProjectEntry(
+                        namespace=proj.get("namespace", "discoverable"),
+                        name=proj.get("name", "unknown"),
+                        domain=cfg.get("domain", "general"),
+                        capabilities=["chat", "llm"],
+                        topics=[],
+                        description=cfg.get("description", ""),
+                        models=[m.get("model", "default") for m in models_cfg] or ["default"],
+                        nodes=[_router.node_id]
+                    )
+                    _router.projects[entry.model_path] = entry
+                
+                # Set default - prefer atmosphere-universal
+                if "discoverable/atmosphere-universal" in _router.projects:
+                    _router._default_project = _router.projects["discoverable/atmosphere-universal"]
+                else:
+                    for path, entry in _router.projects.items():
+                        if "universal" in entry.name.lower() or "atmosphere" in entry.name.lower():
+                            _router._default_project = entry
+                            break
+                    else:
+                        if _router.projects:
+                            _router._default_project = list(_router.projects.values())[0]
+                
+                _router._initialized = True
+                print(f"[FAST_ROUTER] Loaded {len(_router.projects)} projects from API", flush=True)
+                print(f"[FAST_ROUTER] Default: {_router._default_project.model_path if _router._default_project else 'None'}", flush=True)
+            else:
+                raise Exception(f"API returned {resp.status_code}")
+        except Exception as e:
+            print(f"[FAST_ROUTER] API load failed ({e}), falling back to file registry", flush=True)
+            _router.initialize()
+    
     return _router
