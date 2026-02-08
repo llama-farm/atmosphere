@@ -693,10 +693,10 @@ class FastProjectRouter:
         3. KEYWORD: Pure keyword matching (threshold: 0.2)
         4. FALLBACK: Default project with domain boost
         """
-        # Thresholds for cascade tiers
-        EMBEDDING_THRESHOLD = 0.5
-        HASH_THRESHOLD = 0.35
-        KEYWORD_THRESHOLD = 0.2
+        # Thresholds for cascade tiers (lowered for hash-based embeddings)
+        EMBEDDING_THRESHOLD = 0.15  # Hash embeddings produce lower similarities
+        HASH_THRESHOLD = 0.10
+        KEYWORD_THRESHOLD = 0.05
         
         # Extract last user message
         content = ""
@@ -1100,13 +1100,18 @@ def get_fast_router() -> FastProjectRouter:
                     runtime = cfg.get("runtime", {})
                     models_cfg = runtime.get("models", [])
                     
+                    # Get description from config or first model
+                    description = cfg.get("description", "")
+                    if not description and models_cfg:
+                        description = models_cfg[0].get("description", "")
+                    
                     entry = ProjectEntry(
                         namespace=proj.get("namespace", "discoverable"),
                         name=proj.get("name", "unknown"),
                         domain=cfg.get("domain", "general"),
                         capabilities=["chat", "llm"],
                         topics=[],
-                        description=cfg.get("description", ""),
+                        description=description,
                         models=[m.get("model", "default") for m in models_cfg] or ["default"],
                         nodes=[_router.node_id]
                     )
@@ -1124,9 +1129,14 @@ def get_fast_router() -> FastProjectRouter:
                         if _router.projects:
                             _router._default_project = list(_router.projects.values())[0]
                 
+                # Compute embeddings for semantic routing
+                _router._compute_embeddings()
+                _router._build_embedding_matrix()
+                
                 _router._initialized = True
                 print(f"[FAST_ROUTER] Loaded {len(_router.projects)} projects from API", flush=True)
                 print(f"[FAST_ROUTER] Default: {_router._default_project.model_path if _router._default_project else 'None'}", flush=True)
+                print(f"[FAST_ROUTER] Embedding matrix: {_router._embedding_matrix.shape if _router._embedding_matrix is not None else 'None'}", flush=True)
             else:
                 raise Exception(f"API returned {resp.status_code}")
         except Exception as e:
