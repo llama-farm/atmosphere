@@ -20,17 +20,39 @@ Atmosphere is the protocol that makes this real. No central server. Works offlin
 
 ## Quick Start
 
+### Install via pip
+
 ```bash
-# 1. Install
-pip install atmosphere
+# Install the package
+pip install atmosphere-mesh
 
-# 2. Start a node
-atmosphere node start
+# Initialize your node
+atmosphere init
 
-# 3. Route your first intent
-curl -X POST http://localhost:8000/v1/chat/completions \
+# Start the API server
+atmosphere serve
+```
+
+### Install via Homebrew (macOS)
+
+```bash
+# Add the tap
+brew tap llama-farm/atmosphere
+
+# Install
+brew install atmosphere
+
+# Start the service
+brew services start atmosphere
+```
+
+### Quick Test
+
+```bash
+# Route your first intent
+curl -X POST http://localhost:11451/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"messages": [{"role": "user", "content": "Summarize this document"}]}'
+  -d '{"messages": [{"role": "user", "content": "Hello!"}]}'
 ```
 
 The mesh automatically discovers local capabilities (LlamaFarm, Ollama) and routes your request.

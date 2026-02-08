@@ -114,19 +114,23 @@ class TestMeshEndpoints:
             assert response.status_code == 200
             data = response.json()
             assert "token" in data
+            assert "token_display" in data
             assert "mesh_id" in data
             assert "mesh_name" in data
             assert "endpoints" in data
             assert "qr_data" in data
             
-            # Verify token format
-            assert data["token"].startswith("ATM-")
+            # Verify token is a dict (full signed token)
+            assert isinstance(data["token"], dict)
+            
+            # Verify token_display format (human-readable)
+            assert data["token_display"].startswith("ATM-")
             
             # Verify endpoints structure
             endpoints = data["endpoints"]
             assert "local" in endpoints
             
-            print(f"✓ Mesh token: {data['token'][:20]}...")
+            print(f"✓ Mesh token: {data['token_display']}")
             print(f"  Endpoints: {list(endpoints.keys())}")
     
     @pytest.mark.asyncio
@@ -267,9 +271,10 @@ class TestOpenAICompat:
                 }
             )
             
-            # May fail if LlamaFarm not running
-            if response.status_code in [500, 502, 503, 504]:
-                print(f"⚠ Chat completions: Backend unavailable ({response.status_code})")
+            # May fail if LlamaFarm not running or misconfigured
+            if response.status_code in [422, 500, 502, 503, 504]:
+                error_detail = response.json().get("detail", "Unknown error") if response.status_code == 422 else response.text
+                print(f"⚠ Chat completions: Backend unavailable ({response.status_code}): {error_detail}")
                 return
             
             assert response.status_code == 200

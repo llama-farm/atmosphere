@@ -5,6 +5,7 @@ import { RoutingCard } from './RoutingCard';
 import { MeshManager } from './MeshManager';
 import { RoutingTable } from './RoutingTable';
 import { TransportStatus } from './TransportStatus';
+import { BlePairingPanel } from './BlePairingPanel';
 import './Dashboard.css';
 
 export const Dashboard = ({ wsData }) => {
@@ -200,6 +201,9 @@ export const Dashboard = ({ wsData }) => {
         <MeshManager wsData={wsData} />
         <TransportStatus wsData={wsData} />
       </div>
+
+      {/* BLE Pairing Panel */}
+      <BlePairingPanel wsData={wsData} />
 
       {/* Routing Table */}
       <RoutingTable wsData={wsData} />

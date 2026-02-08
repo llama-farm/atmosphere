@@ -1,27 +1,14 @@
 """
-Transport layer for Atmosphere mesh networking.
+Atmosphere Transport Layer - Simplified
 
-This module provides various transport backends:
-- BLE: Bluetooth Low Energy mesh for offline connectivity
-- WiFi: Direct WiFi communication (future)
+For now: Just relay transport.
+Future: Add LAN discovery, BLE, etc. when core routing is solid.
 """
 
-from .ble_mac import (
-    BleTransport,
-    BleMessage,
-    MessageType,
-    MESH_SERVICE_UUID,
-    TX_CHAR_UUID,
-    RX_CHAR_UUID,
-    INFO_CHAR_UUID,
-)
+from .relay import RelayConnection, RelayMessage, create_relay_connection
 
 __all__ = [
-    "BleTransport",
-    "BleMessage",
-    "MessageType",
-    "MESH_SERVICE_UUID",
-    "TX_CHAR_UUID",
-    "RX_CHAR_UUID",
-    "INFO_CHAR_UUID",
+    "RelayConnection",
+    "RelayMessage",
+    "create_relay_connection",
 ]

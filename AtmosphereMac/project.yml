@@ -1,0 +1,34 @@
+name: AtmosphereMac
+options:
+  bundleIdPrefix: com.bespin.atmosphere
+  deploymentTarget:
+    macOS: "13.0"
+  xcodeVersion: "15.0"
+  
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    MACOSX_DEPLOYMENT_TARGET: "13.0"
+    
+targets:
+  AtmosphereMac:
+    type: application
+    platform: macOS
+    sources:
+      - AtmosphereMac
+    info:
+      path: AtmosphereMac/Info.plist
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.bespin.atmosphere.mac
+        PRODUCT_NAME: Atmosphere
+        INFOPLIST_FILE: AtmosphereMac/Info.plist
+        CODE_SIGN_ENTITLEMENTS: AtmosphereMac/Atmosphere.entitlements
+        ENABLE_HARDENED_RUNTIME: YES
+    entitlements:
+      path: AtmosphereMac/Atmosphere.entitlements
+      properties:
+        com.apple.security.app-sandbox: true
+        com.apple.security.network.client: true
+        com.apple.security.network.server: true
+        com.apple.security.device.bluetooth: true

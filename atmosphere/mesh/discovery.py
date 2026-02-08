@@ -146,12 +146,16 @@ class MeshDiscovery:
     async def stop(self) -> None:
         """Stop advertising and discovering."""
         if self._browser:
-            self._browser.cancel()
+            # AsyncServiceBrowser doesn't have .cancel()
+            # It stops when the Zeroconf instance is closed or when it's garbage collected
             self._browser = None
         
         if self._zeroconf:
             if self._service_info:
-                await self._zeroconf.async_unregister_service(self._service_info)
+                try:
+                    await self._zeroconf.async_unregister_service(self._service_info)
+                except Exception:
+                    pass
             await self._zeroconf.async_close()
             self._zeroconf = None
         
@@ -177,7 +181,11 @@ class MeshDiscovery:
         name: str
     ) -> None:
         """Handle a newly discovered service."""
-        info = zeroconf.get_service_info(service_type, name, timeout=3000)
+        if self._zeroconf:
+            info = await self._zeroconf.async_get_service_info(service_type, name, timeout=3000)
+        else:
+            info = zeroconf.get_service_info(service_type, name, timeout=3000)
+        
         if not info:
             return
         

@@ -1,0 +1,81 @@
+{
+  "timestamp": "2026-02-07 01:17:53",
+  "node_id": "65d98c315d54d847",
+  "mesh_id": "0b82206b236bd66c",
+  "mesh_name": "home-mesh",
+  "relay_url": "wss://atmosphere-relay-production.up.railway.app",
+  "steps": [
+    {
+      "step": "Parse Invite",
+      "status": "success",
+      "details": {
+        "mesh_id": "0b82206b236bd66c",
+        "mesh_name": "home-mesh",
+        "endpoints": [
+          "wss://atmosphere-relay-production.up.railway.app"
+        ],
+        "token_expires": "2026-02-14 01:17:53",
+        "issuer_id": "118c1963042d52fc"
+      }
+    },
+    {
+      "step": "WebSocket Connect",
+      "status": "success",
+      "details": {
+        "url": "wss://atmosphere-relay-production.up.railway.app/relay/0b82206b236bd66c"
+      }
+    },
+    {
+      "step": "Send Join",
+      "status": "success",
+      "details": {
+        "node_id": "65d98c315d54d847"
+      }
+    },
+    {
+      "step": "Joined Mesh",
+      "status": "success",
+      "details": {
+        "mesh": "home-mesh",
+        "node_count": 3
+      }
+    },
+    {
+      "step": "Received Peer List",
+      "status": "success",
+      "details": {
+        "peer_count": 2,
+        "peers": [
+          {
+            "node_id": "69ff1fa7cc80d0e0",
+            "name": "home-mesh",
+            "capabilities": [],
+            "is_founder": true,
+            "joined_at": 1770448405.3678346
+          },
+          {
+            "node_id": "003866f1a25c3659",
+            "name": "Test-Peer-Python",
+            "capabilities": [],
+            "is_founder": false,
+            "joined_at": 1770448628.891055
+          }
+        ]
+      }
+    },
+    {
+      "step": "Send LLM Request",
+      "status": "success",
+      "details": {
+        "request_id": "f660048e16c40dde"
+      }
+    },
+    {
+      "step": "Wait for LLM Response",
+      "status": "timeout",
+      "details": "Joined mesh but no LLM response received within timeout"
+    }
+  ],
+  "success": true,
+  "error": null
+}

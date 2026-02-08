@@ -10,7 +10,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass
-from typing import Dict, Optional, Set
+from typing import Dict, Optional, Set, Union
 
 import aiohttp
 from aiohttp import web
@@ -249,7 +249,11 @@ class RelayClient:
             url = f"{self.relay_url}/relay/{self.session_id}"
             
             self.ws = await asyncio.wait_for(
-                self._session.ws_connect(url),
+                self._session.ws_connect(
+                    url,
+                    heartbeat=20.0,  # Send ping every 20s to keep connection alive
+                    receive_timeout=None,  # No receive timeout
+                ),
                 timeout=timeout
             )
             
@@ -272,12 +276,12 @@ class RelayClient:
             await self._session.close()
             self._session = None
     
-    async def send(self, data: bytes) -> bool:
+    async def send(self, data: Union[bytes, dict, str]) -> bool:
         """
         Send data through the relay.
         
         Args:
-            data: Data to send
+            data: Data to send (bytes, dict for JSON, or string)
             
         Returns:
             True if sent, False if not connected
@@ -286,7 +290,13 @@ class RelayClient:
             return False
         
         try:
-            await self.ws.send_bytes(data)
+            if isinstance(data, dict):
+                import json
+                await self.ws.send_str(json.dumps(data))
+            elif isinstance(data, str):
+                await self.ws.send_str(data)
+            else:
+                await self.ws.send_bytes(data)
             return True
         except Exception as e:
             logger.error(f"Failed to send via relay: {e}")

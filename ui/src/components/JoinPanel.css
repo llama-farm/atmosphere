@@ -561,3 +561,115 @@
     margin-left: calc(16px + 0.5rem + 90px);
   }
 }
+
+/* QR Code Enlargement Modal */
+.qr-container.clickable {
+  cursor: pointer;
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.qr-container.clickable:hover {
+  transform: scale(1.02);
+  box-shadow: 0 8px 32px rgba(59, 130, 246, 0.3);
+}
+
+.qr-hint {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  margin-top: 0.5rem;
+  opacity: 0.7;
+}
+
+.qr-modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.85);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  animation: fadeIn 0.2s ease;
+}
+
+.qr-modal {
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 1.5rem;
+  padding: 2rem;
+  max-width: 90vw;
+  max-height: 90vh;
+  animation: slideUp 0.3s ease;
+}
+
+.qr-modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1.5rem;
+}
+
+.qr-modal-header h3 {
+  font-size: 1.5rem;
+  color: var(--text-primary);
+  margin: 0;
+}
+
+.close-button {
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  padding: 0.5rem;
+  border-radius: 0.5rem;
+  transition: all 0.2s ease;
+}
+
+.close-button:hover {
+  color: var(--text-primary);
+  background: var(--bg-secondary);
+}
+
+.qr-modal-content {
+  display: flex;
+  justify-content: center;
+  padding: 2rem;
+  background: white;
+  border-radius: 1rem;
+  margin-bottom: 1.5rem;
+}
+
+.qr-modal-info {
+  text-align: center;
+}
+
+.qr-modal-info .token-display {
+  font-family: monospace;
+  font-size: 1.5rem;
+  font-weight: bold;
+  color: var(--accent-primary);
+  margin-bottom: 0.5rem;
+}
+
+.qr-modal-info .mesh-name {
+  color: var(--text-secondary);
+  font-size: 1rem;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes slideUp {
+  from { 
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to { 
+    opacity: 1;
+    transform: translateY(0);
+  }
+}

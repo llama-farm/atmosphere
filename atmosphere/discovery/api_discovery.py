@@ -77,6 +77,13 @@ class APIDiscovery:
         self._cache_time: float = 0
         self._namespaces: Set[str] = set()
     
+    async def discover_namespace(self, namespace: str) -> List[DiscoveredProject]:
+        """Discover all projects in a specific namespace."""
+        logger.info(f"Discovering projects from {self.llamafarm_url} in namespace {namespace}")
+        
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            return await self._discover_namespace_projects(client, namespace)
+
     async def discover(self, force_refresh: bool = False) -> List[DiscoveredProject]:
         """
         Discover all projects from the LlamaFarm API.
@@ -112,8 +119,8 @@ class APIDiscovery:
     
     async def _discover_namespaces(self, client: httpx.AsyncClient) -> List[str]:
         """Discover available namespaces."""
-        # Known namespaces to check
-        known = ["default", "atmosphere", "edge", "examples", "llamafarm"]
+        # Known namespaces to check (discoverable is primary for mesh exposure)
+        known = ["discoverable", "default", "atmosphere", "edge", "examples", "llamafarm"]
         found = []
         
         for ns in known:

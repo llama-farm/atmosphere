@@ -11,6 +11,7 @@ export const JoinPanel = () => {
   const [generating, setGenerating] = useState(false);
   const [showQR, setShowQR] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [qrEnlarged, setQrEnlarged] = useState(false);
 
   const handleJoin = async () => {
     if (!token.trim()) return;
@@ -71,7 +72,7 @@ export const JoinPanel = () => {
 
       const data = await response.json();
       setInviteData({
-        token: data.token,
+        token: data.token_display || data.token,  // Use display version for UI
         meshName: data.mesh_name,
         endpoint: data.endpoint,
         endpoints: data.endpoints || { local: data.endpoint },
@@ -226,11 +227,15 @@ export const JoinPanel = () => {
             <div className="invite-display slide-in">
               {showQR && (
                 <div className="qr-section">
-                  <div className="qr-container">
+                  <div 
+                    className="qr-container clickable"
+                    onClick={() => setQrEnlarged(true)}
+                    title="Click to enlarge"
+                  >
                     <QRCodeSVG
                       value={inviteData.qrData}
                       size={200}
-                      level="M"
+                      level="L"
                       includeMargin={true}
                       bgColor="#1a1a2e"
                       fgColor="#ffffff"
@@ -239,6 +244,37 @@ export const JoinPanel = () => {
                   <div className="qr-info">
                     <Smartphone size={16} />
                     <span>Scan with Atmosphere app to join</span>
+                  </div>
+                  <div className="qr-hint">
+                    Click QR code to enlarge
+                  </div>
+                </div>
+              )}
+              
+              {/* Enlarged QR Modal */}
+              {qrEnlarged && (
+                <div className="qr-modal-overlay" onClick={() => setQrEnlarged(false)}>
+                  <div className="qr-modal" onClick={(e) => e.stopPropagation()}>
+                    <div className="qr-modal-header">
+                      <h3>Scan to Join Mesh</h3>
+                      <button className="close-button" onClick={() => setQrEnlarged(false)}>
+                        <XCircle size={24} />
+                      </button>
+                    </div>
+                    <div className="qr-modal-content">
+                      <QRCodeSVG
+                        value={inviteData.qrData}
+                        size={400}
+                        level="L"
+                        includeMargin={true}
+                        bgColor="#ffffff"
+                        fgColor="#000000"
+                      />
+                    </div>
+                    <div className="qr-modal-info">
+                      <div className="token-display">{inviteData.token}</div>
+                      <div className="mesh-name">{inviteData.meshName}</div>
+                    </div>
                   </div>
                 </div>
               )}

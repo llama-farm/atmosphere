@@ -12,6 +12,7 @@ import { Capabilities } from './components/Capabilities';
 import { ApprovalPanel } from './components/ApprovalPanel';
 import { TestingPanel } from './components/TestingPanel';
 import { ProjectsPanel } from './components/ProjectsPanel';
+import { BlePairingPanel } from './components/BlePairingPanel';
 import { 
   LayoutDashboard, 
   Network, 
@@ -26,7 +27,8 @@ import {
   Layers,
   Shield,
   FlaskConical,
-  Folder
+  Folder,
+  Bluetooth
 } from 'lucide-react';
 import './App.css';
 
@@ -42,6 +44,7 @@ const pages = [
   { id: 'testing', label: 'Testing', icon: FlaskConical, component: TestingPanel },
   { id: 'gossip', label: 'Gossip Feed', icon: Radio, component: GossipFeed },
   { id: 'join', label: 'Join Mesh', icon: Link2, component: JoinPanel },
+  { id: 'ble-pairing', label: 'BLE Pairing', icon: Bluetooth, component: BlePairingPanel },
   { id: 'settings', label: 'Settings', icon: Shield, component: ApprovalPanel },
 ];
 
@@ -53,7 +56,7 @@ function App() {
     const saved = localStorage.getItem('atmosphere_demo_mode');
     return saved === 'true';
   });
-  const { isConnected, lastMessage } = useWebSocket('/ws');
+  const { isConnected, lastMessage } = useWebSocket('/api/ws');
 
   // Persist demoMode changes
   const toggleDemoMode = (enabled) => {

@@ -183,6 +183,23 @@ class GossipManager:
         """Get all local capabilities."""
         return list(self._local_capabilities.values())
     
+    def _build_announce_message(self) -> dict:
+        """Build a gossip announce message dict (for direct send without relay)."""
+        capabilities = list(self._local_capabilities.values())
+        now = time.time()
+        for cap in capabilities:
+            cap.timestamp = now
+            cap.expires_at = now + 300
+        cap_dicts = [cap.to_dict() for cap in capabilities]
+        msg = GossipMessage(
+            type=GOSSIP_MSG_ANNOUNCE,
+            node_id=self.node_id,
+            timestamp=now,
+            capabilities=cap_dicts,
+            ttl=10,
+        )
+        return msg.to_dict()
+
     async def broadcast_capabilities(
         self,
         capabilities: Optional[List[CapabilityAnnouncement]] = None

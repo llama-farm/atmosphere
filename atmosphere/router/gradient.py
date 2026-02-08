@@ -177,6 +177,19 @@ class GradientTable:
         """Get a specific entry by ID."""
         with self._lock:
             return self._entries.get(capability_id)
+    
+    def get_entry(self, capability_id: str) -> Optional[GradientEntry]:
+        """Alias for get()."""
+        return self.get(capability_id)
+    
+    def all_entries(self) -> List[GradientEntry]:
+        """Get all non-expired entries."""
+        with self._lock:
+            now = time.time()
+            return [
+                entry for entry in self._entries.values()
+                if not entry.is_expired(self.expire_sec)
+            ]
 
     def _rebuild_index(self) -> None:
         """Rebuild the vector index for fast similarity search."""

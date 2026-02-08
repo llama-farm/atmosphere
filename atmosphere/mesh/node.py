@@ -205,6 +205,9 @@ class MeshIdentity:
             total_shares=total_shares,
         )
         
+        # Add master keypair to local state for founders to sign registration
+        mesh._master_keypair = master_keypair
+        
         founder = FoundingMember(
             node_id=node_keypair.key_id(),
             public_key=node_keypair.public_key_b64(),
@@ -302,15 +305,24 @@ class MeshIdentity:
             with open(secrets_path, 'r') as f:
                 secrets_data = json.load(f)
             
+            share_data = bytes.fromhex(secrets_data["share_data"])
             mesh._local_share = (
                 secrets_data["share_index"],
-                bytes.fromhex(secrets_data["share_data"])
+                share_data
             )
             
             if secrets_data.get("node_private_key"):
                 mesh._local_key_pair = KeyPair.from_private_bytes(
                     bytes.fromhex(secrets_data["node_private_key"])
                 )
+            
+            # For single-founder meshes (threshold=1), reconstruct master keypair
+            # The share_data IS the master private key when threshold=1
+            if mesh.threshold == 1:
+                try:
+                    mesh._master_keypair = KeyPair.from_private_bytes(share_data)
+                except Exception:
+                    pass  # Fall back to no master keypair if reconstruction fails
         
         return mesh
 

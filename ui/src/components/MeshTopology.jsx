@@ -14,6 +14,15 @@ const CAPABILITY_TYPES = {
   'default': { icon: '⚡', color: '#f59e0b', label: 'Capability' },
 };
 
+// Transport type colors and styles
+const TRANSPORT_TYPES = {
+  'ble': { color: '#cba6f7', label: 'BLE', dashArray: 'none', width: 2 },
+  'lan': { color: '#a6e3a1', label: 'LAN', dashArray: 'none', width: 3 },
+  'relay': { color: '#89b4fa', label: 'Relay', dashArray: '6,4', width: 2 },
+  'wifi_direct': { color: '#fab387', label: 'WiFi Direct', dashArray: 'none', width: 2 },
+  'unknown': { color: '#6b7280', label: 'Unknown', dashArray: '4,4', width: 1 },
+};
+
 const STATUS_COLORS = {
   online: '#10b981',
   busy: '#f59e0b',
@@ -70,6 +79,8 @@ export const MeshTopology = ({ wsData }) => {
           source: conn.source,
           target: conn.target,
           strength: conn.strength || 1,
+          transportType: conn.transport_type || conn.transportType || 'unknown',
+          latencyMs: conn.latency_ms || conn.latencyMs,
         })) || [];
 
         if (nodeData.length > 0) {
@@ -100,10 +111,13 @@ export const MeshTopology = ({ wsData }) => {
         y: Math.random() * 600,
       }));
 
+      const transportTypes = ['ble', 'lan', 'relay', 'wifi_direct'];
       const demoLinks = Array.from({ length: 8 }, (_, i) => ({
         source: `node-${i % 6}`,
         target: `node-${(i + 1) % 6}`,
         strength: Math.random(),
+        transportType: transportTypes[i % 4],
+        latencyMs: Math.floor(Math.random() * 100) + 10,
       }));
 
       setNodes(demoNodes);
@@ -142,15 +156,25 @@ export const MeshTopology = ({ wsData }) => {
 
     simulationRef.current = simulation;
 
-    // Create links
+    // Create links with transport-based styling
     const link = g.append('g')
       .selectAll('line')
       .data(links)
       .join('line')
-      .attr('class', 'mesh-link')
-      .attr('stroke', '#374151')
-      .attr('stroke-width', d => Math.max(1, d.strength * 3))
-      .attr('stroke-opacity', 0.6);
+      .attr('class', d => `mesh-link transport-${d.transportType || 'unknown'}`)
+      .attr('stroke', d => {
+        const transport = TRANSPORT_TYPES[d.transportType] || TRANSPORT_TYPES.unknown;
+        return transport.color;
+      })
+      .attr('stroke-width', d => {
+        const transport = TRANSPORT_TYPES[d.transportType] || TRANSPORT_TYPES.unknown;
+        return transport.width * Math.max(0.5, d.strength);
+      })
+      .attr('stroke-dasharray', d => {
+        const transport = TRANSPORT_TYPES[d.transportType] || TRANSPORT_TYPES.unknown;
+        return transport.dashArray;
+      })
+      .attr('stroke-opacity', 0.7);
 
     // Create nodes
     const node = g.append('g')
@@ -255,7 +279,7 @@ export const MeshTopology = ({ wsData }) => {
       .attr('font-weight', '700')
       .attr('pointer-events', 'none');
 
-    // Hover tooltip
+    // Hover tooltip for both nodes and links
     const tooltip = d3.select('body').append('div')
       .attr('class', 'mesh-tooltip')
       .style('opacity', 0)
@@ -266,6 +290,32 @@ export const MeshTopology = ({ wsData }) => {
       .style('padding', '12px')
       .style('pointer-events', 'none')
       .style('z-index', 1000);
+
+    // Link hover for transport info
+    link.on('mouseover', (event, d) => {
+      const transport = TRANSPORT_TYPES[d.transportType] || TRANSPORT_TYPES.unknown;
+      
+      tooltip.transition().duration(200).style('opacity', 1);
+      tooltip.html(`
+        <div style="font-weight: 700; margin-bottom: 6px;">Connection</div>
+        <div style="font-size: 12px; color: ${transport.color}; margin-bottom: 4px;">
+          🔗 ${transport.label}
+        </div>
+        ${d.latencyMs ? `
+          <div style="font-size: 11px; color: #9ca3af;">
+            Latency: ${d.latencyMs}ms
+          </div>
+        ` : ''}
+        <div style="font-size: 11px; color: #6b7280; margin-top: 4px;">
+          Strength: ${Math.round(d.strength * 100)}%
+        </div>
+      `)
+        .style('left', (event.pageX + 10) + 'px')
+        .style('top', (event.pageY - 10) + 'px');
+    })
+    .on('mouseout', () => {
+      tooltip.transition().duration(500).style('opacity', 0);
+    });
 
     node.on('mouseover', (event, d) => {
       const capType = d.capabilityTypes?.[0] || 'default';
@@ -425,6 +475,19 @@ export const MeshTopology = ({ wsData }) => {
           <div className="legend-item">
             <div className="legend-ring cost-high"></div>
             <span>High Cost</span>
+          </div>
+          <div className="legend-divider"></div>
+          <div className="legend-item">
+            <div className="legend-line ble"></div>
+            <span>BLE</span>
+          </div>
+          <div className="legend-item">
+            <div className="legend-line lan"></div>
+            <span>LAN</span>
+          </div>
+          <div className="legend-item">
+            <div className="legend-line relay"></div>
+            <span>Relay</span>
           </div>
         </div>
       </div>

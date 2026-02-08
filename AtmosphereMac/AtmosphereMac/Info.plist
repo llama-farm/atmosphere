@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>Atmosphere</string>
+    <key>CFBundleDisplayName</key>
+    <string>Atmosphere</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.bespin.atmosphere.mac</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0.0</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>13.0</string>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.developer-tools</string>
+    
+    <!-- Bluetooth Permissions -->
+    <key>NSBluetoothAlwaysUsageDescription</key>
+    <string>Atmosphere needs Bluetooth to discover and connect to nearby mesh nodes for offline AI communication.</string>
+    <key>NSBluetoothPeripheralUsageDescription</key>
+    <string>Atmosphere needs Bluetooth to advertise as a mesh node and accept connections from nearby devices.</string>
+    
+    <!-- Network Permissions -->
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>Atmosphere uses the local network to connect to the cloud relay server.</string>
+    
+    <!-- Background Modes -->
+    <key>UIBackgroundModes</key>
+    <array>
+        <string>bluetooth-central</string>
+        <string>bluetooth-peripheral</string>
+    </array>
+    
+    <!-- App Sandbox (required for App Store) -->
+    <key>com.apple.security.app-sandbox</key>
+    <true/>
+    <key>com.apple.security.network.client</key>
+    <true/>
+    <key>com.apple.security.network.server</key>
+    <true/>
+    <key>com.apple.security.device.bluetooth</key>
+    <true/>
+</dict>
+</plist>

@@ -109,6 +109,32 @@
   border-color: #ef4444;
 }
 
+/* Transport type legend lines */
+.legend-line {
+  width: 24px;
+  height: 3px;
+  border-radius: 2px;
+}
+
+.legend-line.ble {
+  background: #cba6f7;
+}
+
+.legend-line.lan {
+  background: #a6e3a1;
+}
+
+.legend-line.relay {
+  background: #89b4fa;
+  background: repeating-linear-gradient(
+    90deg,
+    #89b4fa 0px,
+    #89b4fa 6px,
+    transparent 6px,
+    transparent 10px
+  );
+}
+
 .cost-ring {
   transition: stroke 0.3s ease;
 }
@@ -151,12 +177,26 @@
 }
 
 .mesh-link {
-  transition: stroke-opacity 0.2s;
+  transition: stroke-opacity 0.2s, stroke-width 0.2s;
+  cursor: pointer;
 }
 
 .mesh-link:hover {
   stroke-opacity: 1;
-  stroke: var(--accent-primary);
+  stroke-width: 4px !important;
+}
+
+/* Transport-specific link styles */
+.mesh-link.transport-ble {
+  filter: drop-shadow(0 0 2px rgba(203, 166, 247, 0.4));
+}
+
+.mesh-link.transport-lan {
+  filter: drop-shadow(0 0 2px rgba(166, 227, 161, 0.4));
+}
+
+.mesh-link.transport-relay {
+  filter: drop-shadow(0 0 2px rgba(137, 180, 250, 0.4));
 }
 
 .glow-node circle {

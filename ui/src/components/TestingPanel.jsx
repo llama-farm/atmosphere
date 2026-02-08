@@ -329,15 +329,15 @@ export function TestingPanel() {
                     <div className="factors-grid">
                       <div className="factor">
                         <span>Battery</span>
-                        <span>{(node.costFactors.battery_level * 100).toFixed(0)}%</span>
+                        <span>{node.costFactors.battery_percent ?? 'N/A'}%</span>
                       </div>
                       <div className="factor">
                         <span>CPU Load</span>
-                        <span>{(node.costFactors.cpu_load * 100).toFixed(0)}%</span>
+                        <span>{((node.costFactors.cpu_load ?? 0) * 100).toFixed(0)}%</span>
                       </div>
                       <div className="factor">
                         <span>Memory</span>
-                        <span>{(node.costFactors.memory_pressure * 100).toFixed(0)}%</span>
+                        <span>{node.costFactors.memory_percent?.toFixed(0) ?? 'N/A'}%</span>
                       </div>
                     </div>
                   </div>

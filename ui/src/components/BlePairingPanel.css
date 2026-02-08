@@ -1,0 +1,318 @@
+.ble-pairing-panel {
+  background: var(--bg-secondary, #1a1b26);
+  border-radius: 12px;
+  padding: 20px;
+  border: 1px solid var(--border-color, #2d2f3a);
+}
+
+.pairing-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.pairing-header h3 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 16px;
+  font-weight: 600;
+  color: #f3f4f6;
+  margin: 0;
+}
+
+.pairing-header h3 svg {
+  color: #89b4fa;
+}
+
+.scan-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  background: #374151;
+  border: none;
+  border-radius: 6px;
+  color: #f3f4f6;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.scan-btn:hover:not(:disabled) {
+  background: #4b5563;
+}
+
+.scan-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.pairing-error {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  background: rgba(239, 68, 68, 0.15);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  border-radius: 8px;
+  color: #f87171;
+  font-size: 13px;
+  margin-bottom: 16px;
+}
+
+/* Pairing Code Display */
+.pairing-code-display {
+  background: linear-gradient(135deg, rgba(139, 92, 246, 0.15), rgba(59, 130, 246, 0.15));
+  border: 2px solid rgba(139, 92, 246, 0.3);
+  border-radius: 16px;
+  padding: 24px;
+  text-align: center;
+  animation: pulse-border 2s ease-in-out infinite;
+}
+
+@keyframes pulse-border {
+  0%, 100% { border-color: rgba(139, 92, 246, 0.3); }
+  50% { border-color: rgba(139, 92, 246, 0.6); }
+}
+
+.code-header {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  margin-bottom: 12px;
+  color: #f3f4f6;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.shield-icon {
+  color: #a78bfa;
+}
+
+.code-peer-name {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: #9ca3af;
+  font-size: 14px;
+  margin-bottom: 20px;
+}
+
+.code-digits {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  margin: 24px 0;
+}
+
+.code-row {
+  display: flex;
+  gap: 8px;
+}
+
+.code-digit {
+  width: 48px;
+  height: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.3);
+  border: 2px solid rgba(139, 92, 246, 0.5);
+  border-radius: 10px;
+  font-size: 28px;
+  font-weight: 700;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  color: #f3f4f6;
+  text-shadow: 0 0 10px rgba(139, 92, 246, 0.5);
+}
+
+.code-instruction {
+  color: #9ca3af;
+  font-size: 13px;
+  margin: 16px 0;
+}
+
+.code-actions {
+  display: flex;
+  gap: 12px;
+  justify-content: center;
+}
+
+.confirm-btn,
+.reject-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 20px;
+  border: none;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.confirm-btn {
+  background: linear-gradient(135deg, #10b981, #059669);
+  color: white;
+}
+
+.confirm-btn:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(16, 185, 129, 0.3);
+}
+
+.reject-btn {
+  background: #374151;
+  color: #f3f4f6;
+}
+
+.reject-btn:hover {
+  background: #4b5563;
+}
+
+/* Nearby Devices */
+.nearby-devices h4 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 500;
+  color: #9ca3af;
+  margin: 0 0 12px 0;
+}
+
+.no-devices {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 32px;
+  color: #6b7280;
+  text-align: center;
+}
+
+.no-devices .muted {
+  opacity: 0.3;
+}
+
+.no-devices p {
+  margin: 0;
+  font-size: 14px;
+  color: #9ca3af;
+}
+
+.no-devices span {
+  font-size: 12px;
+}
+
+.device-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.device-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 8px;
+  transition: background 0.2s;
+}
+
+.device-item:hover {
+  background: rgba(0, 0, 0, 0.3);
+}
+
+.device-icon {
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(137, 180, 250, 0.15);
+  border-radius: 10px;
+  color: #89b4fa;
+}
+
+.device-info {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.device-name {
+  font-size: 14px;
+  font-weight: 500;
+  color: #f3f4f6;
+}
+
+.device-meta {
+  font-size: 12px;
+  color: #6b7280;
+}
+
+.pair-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  background: linear-gradient(135deg, #3b82f6, #2563eb);
+  border: none;
+  border-radius: 6px;
+  color: white;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.pair-btn:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(59, 130, 246, 0.3);
+}
+
+/* Pairing State */
+.pairing-state {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 12px;
+  border-radius: 8px;
+  font-size: 13px;
+  margin-top: 12px;
+}
+
+.pairing-state.initiating,
+.pairing-state.exchanging {
+  background: rgba(139, 92, 246, 0.15);
+  color: #a78bfa;
+}
+
+.pairing-state.completed {
+  background: rgba(16, 185, 129, 0.15);
+  color: #34d399;
+}
+
+.pairing-state.failed {
+  background: rgba(239, 68, 68, 0.15);
+  color: #f87171;
+}
+
+.spin {
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}

@@ -32,30 +32,31 @@ class LlamaFarmDiscovery:
         
         Only returns projects in the configured namespace (default: "discoverable").
         This ensures Atmosphere only exposes what's meant for the mesh.
+        
+        LlamaFarm API: GET /v1/projects/{namespace}
+        Response: {"total": N, "projects": [...]}
         """
         import requests
         
         try:
-            # Query LlamaFarm API for projects
-            response = requests.get(f"{self.base_url}/api/projects", timeout=5)
+            # Query LlamaFarm API for projects in the specified namespace
+            # API endpoint: GET /v1/projects/{namespace}
+            url = f"{self.base_url}/v1/projects/{self.namespace}"
+            response = requests.get(url, timeout=5)
+            
             if response.status_code != 200:
                 return []
             
-            all_projects = response.json()
+            data = response.json()
+            projects = data.get("projects", [])
             
-            # Filter to only the specified namespace
-            if self.namespace:
-                # If namespace is set, only return that namespace's projects
-                for project in all_projects:
-                    if project.get("name") == self.namespace:
-                        return [{
-                            "name": project.get("name"),
-                            "sub_projects": project.get("sub_projects", [])[:10],
-                            "sub_project_count": len(project.get("sub_projects", []))
-                        }]
-                return []  # Namespace not found
-            
-            return all_projects
+            # Format for Atmosphere UI
+            return [{
+                "name": self.namespace,
+                "sub_projects": [p.get("name", "") for p in projects[:10]],
+                "sub_project_count": data.get("total", len(projects)),
+                "projects": projects  # Full project data
+            }]
             
         except Exception as e:
             # Fallback: return empty if API not available

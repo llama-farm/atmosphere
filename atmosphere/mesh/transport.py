@@ -16,9 +16,10 @@ import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional, Set
+from typing import Callable, Dict, List, Optional
 
 import aiohttp
+from aiohttp import web
 from zeroconf import ServiceBrowser, Zeroconf
 
 logger = logging.getLogger(__name__)
@@ -180,11 +181,13 @@ class Transport(ABC):
 class LANTransport(Transport):
     """Local network WebSocket transport."""
     
-    def __init__(self, config: dict):
+    def __init__(self, config: dict, node_id: str = None, mesh_id: str = None):
         super().__init__(TransportType.LAN, config)
         self._ws: Optional[aiohttp.ClientWebSocketResponse] = None
         self._session: Optional[aiohttp.ClientSession] = None
         self._receive_task: Optional[asyncio.Task] = None
+        self._node_id = node_id
+        self._mesh_id = mesh_id
     
     async def connect(self, peer_id: str, endpoint: str) -> bool:
         """Connect to peer via WebSocket."""
@@ -194,6 +197,23 @@ class LANTransport(Transport):
                 endpoint,
                 timeout=aiohttp.ClientTimeout(total=10)
             )
+            
+            # Send handshake to identify ourselves
+            if self._node_id:
+                await self._ws.send_json({
+                    "type": "handshake",
+                    "node_id": self._node_id,
+                    "mesh_id": self._mesh_id or "",
+                })
+                
+                # Wait for acknowledgment
+                try:
+                    ack = await asyncio.wait_for(self._ws.receive_json(), timeout=5)
+                    if ack.get("type") != "handshake_ack":
+                        logger.warning(f"Unexpected handshake response: {ack}")
+                except asyncio.TimeoutError:
+                    logger.warning("Handshake acknowledgment timeout")
+            
             self.connected = True
             
             # Start receive loop
@@ -246,6 +266,199 @@ class LANTransport(Transport):
             logger.warning(f"LAN receive error: {e}")
         finally:
             self.connected = False
+
+
+# ============================================================================
+# LAN WebSocket Server
+# ============================================================================
+
+class LANServer:
+    """
+    WebSocket server for accepting incoming LAN connections.
+    
+    This is the missing piece - peers discover us via mDNS but need
+    a server to connect to. This provides that server.
+    """
+    
+    def __init__(
+        self,
+        node_id: str,
+        mesh_id: str,
+        host: str = "0.0.0.0",
+        port: int = 11450,
+    ):
+        self.node_id = node_id
+        self.mesh_id = mesh_id
+        self.host = host
+        self.port = port
+        
+        self._app: Optional[web.Application] = None
+        self._runner: Optional[web.AppRunner] = None
+        self._site: Optional[web.TCPSite] = None
+        self._clients: Dict[str, web.WebSocketResponse] = {}  # peer_id -> ws
+        
+        # Callbacks
+        self._on_peer_connected: Optional[Callable[[str, web.WebSocketResponse], None]] = None
+        self._on_peer_disconnected: Optional[Callable[[str], None]] = None
+        self._on_message: Optional[Callable[[str, bytes], None]] = None
+    
+    def on_peer_connected(self, handler: Callable[[str, web.WebSocketResponse], None]):
+        """Set handler for new peer connections."""
+        self._on_peer_connected = handler
+    
+    def on_peer_disconnected(self, handler: Callable[[str], None]):
+        """Set handler for peer disconnections."""
+        self._on_peer_disconnected = handler
+    
+    def on_message(self, handler: Callable[[str, bytes], None]):
+        """Set handler for incoming messages: handler(peer_id, data)."""
+        self._on_message = handler
+    
+    async def start(self) -> bool:
+        """Start the WebSocket server."""
+        try:
+            self._app = web.Application()
+            self._app.router.add_get("/ws", self._handle_websocket)
+            self._app.router.add_get("/", self._handle_info)
+            
+            self._runner = web.AppRunner(self._app)
+            await self._runner.setup()
+            
+            self._site = web.TCPSite(self._runner, self.host, self.port)
+            await self._site.start()
+            
+            logger.info(f"LAN WebSocket server started on {self.host}:{self.port}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to start LAN server: {e}")
+            return False
+    
+    async def stop(self):
+        """Stop the WebSocket server."""
+        # Close all client connections
+        for peer_id, ws in list(self._clients.items()):
+            try:
+                await ws.close()
+            except Exception:
+                pass
+        self._clients.clear()
+        
+        if self._site:
+            await self._site.stop()
+        if self._runner:
+            await self._runner.cleanup()
+        
+        logger.info("LAN WebSocket server stopped")
+    
+    async def _handle_info(self, request: web.Request) -> web.Response:
+        """Handle info endpoint for health checks."""
+        return web.json_response({
+            "node_id": self.node_id,
+            "mesh_id": self.mesh_id,
+            "type": "atmosphere-lan",
+            "websocket": f"ws://{request.host}/ws",
+        })
+    
+    async def _handle_websocket(self, request: web.Request) -> web.WebSocketResponse:
+        """Handle incoming WebSocket connections."""
+        ws = web.WebSocketResponse()
+        await ws.prepare(request)
+        
+        peer_id = None
+        
+        try:
+            # First message should be handshake with peer info
+            async for msg in ws:
+                if msg.type == aiohttp.WSMsgType.TEXT:
+                    try:
+                        data = json.loads(msg.data)
+                        
+                        # Handle handshake
+                        if data.get("type") == "handshake":
+                            peer_id = data.get("node_id")
+                            peer_mesh = data.get("mesh_id")
+                            
+                            if not peer_id:
+                                await ws.send_json({"type": "error", "message": "Missing node_id"})
+                                break
+                            
+                            # Optional: Verify mesh_id matches
+                            if peer_mesh and peer_mesh != self.mesh_id:
+                                await ws.send_json({"type": "error", "message": "Mesh ID mismatch"})
+                                break
+                            
+                            self._clients[peer_id] = ws
+                            logger.info(f"LAN peer connected: {peer_id} from {request.remote}")
+                            
+                            # Send acknowledgment
+                            await ws.send_json({
+                                "type": "handshake_ack",
+                                "node_id": self.node_id,
+                                "mesh_id": self.mesh_id,
+                            })
+                            
+                            if self._on_peer_connected:
+                                self._on_peer_connected(peer_id, ws)
+                        
+                        # Handle regular messages
+                        elif peer_id and self._on_message:
+                            self._on_message(peer_id, msg.data.encode())
+                            
+                    except json.JSONDecodeError:
+                        if peer_id and self._on_message:
+                            self._on_message(peer_id, msg.data.encode())
+                
+                elif msg.type == aiohttp.WSMsgType.BINARY:
+                    if peer_id and self._on_message:
+                        self._on_message(peer_id, msg.data)
+                
+                elif msg.type == aiohttp.WSMsgType.ERROR:
+                    logger.warning(f"LAN WebSocket error: {ws.exception()}")
+                    break
+                    
+        except Exception as e:
+            logger.warning(f"LAN connection error: {e}")
+        
+        finally:
+            if peer_id:
+                self._clients.pop(peer_id, None)
+                logger.info(f"LAN peer disconnected: {peer_id}")
+                if self._on_peer_disconnected:
+                    self._on_peer_disconnected(peer_id)
+        
+        return ws
+    
+    async def send(self, peer_id: str, message: bytes) -> bool:
+        """Send message to a specific connected peer."""
+        ws = self._clients.get(peer_id)
+        if not ws or ws.closed:
+            return False
+        try:
+            await ws.send_bytes(message)
+            return True
+        except Exception as e:
+            logger.warning(f"LAN server send failed to {peer_id}: {e}")
+            return False
+    
+    async def broadcast(self, message: bytes, exclude: Optional[str] = None) -> int:
+        """Broadcast message to all connected peers. Returns count sent."""
+        sent = 0
+        for peer_id, ws in list(self._clients.items()):
+            if peer_id == exclude:
+                continue
+            if not ws.closed:
+                try:
+                    await ws.send_bytes(message)
+                    sent += 1
+                except Exception:
+                    pass
+        return sent
+    
+    @property
+    def connected_peers(self) -> List[str]:
+        """Get list of connected peer IDs."""
+        return [pid for pid, ws in self._clients.items() if not ws.closed]
 
 
 # ============================================================================
@@ -580,6 +793,9 @@ class TransportManager:
         # Transport instances
         self._lan_server = None
         self._relay: Optional[RelayTransport] = None
+        self._wifi_direct = None
+        self._ble_mesh = None
+        self._matter_bridge = None
         self._zeroconf: Optional[Zeroconf] = None
     
     def on_message(self, handler: Callable[[str, bytes], None]):
@@ -602,19 +818,41 @@ class TransportManager:
         """
         self._running = True
         
-        # Start relay connection (always enabled by default)
+        # Start all enabled transports concurrently
+        tasks = []
+        
+        # LAN discovery
+        if self.config.is_enabled(TransportType.LAN):
+            tasks.append(self._start_lan_discovery())
+        
+        # WiFi Direct
+        if self.config.is_enabled(TransportType.WIFI_DIRECT):
+            tasks.append(self._start_wifi_direct(is_founder, capabilities))
+        
+        # BLE Mesh
+        if self.config.is_enabled(TransportType.BLE_MESH):
+            tasks.append(self._start_ble_mesh(is_founder, capabilities))
+        
+        # Matter bridge
+        if self.config.is_enabled(TransportType.MATTER):
+            tasks.append(self._start_matter_bridge())
+        
+        # Relay (always as fallback)
         if self.config.is_enabled(TransportType.RELAY):
-            await self._start_relay(
+            tasks.append(self._start_relay(
                 is_founder=is_founder,
                 mesh_public_key=mesh_public_key,
                 founder_proof=founder_proof,
                 token=token,
                 capabilities=capabilities,
-            )
+            ))
         
-        # Start LAN discovery
-        if self.config.is_enabled(TransportType.LAN):
-            await self._start_lan_discovery()
+        # Run all transport starts concurrently
+        if tasks:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for i, result in enumerate(results):
+                if isinstance(result, Exception):
+                    logger.warning(f"Transport start failed: {result}")
         
         # Start probe task for optimization
         self._probe_task = asyncio.create_task(self._probe_loop())
@@ -644,6 +882,10 @@ class TransportManager:
         if self._relay:
             await self._relay.disconnect()
         
+        # Stop LAN server
+        if self._lan_server:
+            await self._lan_server.stop()
+        
         # Stop zeroconf
         if self._zeroconf:
             self._zeroconf.close()
@@ -652,24 +894,52 @@ class TransportManager:
     
     async def send(self, peer_id: str, message: bytes) -> bool:
         """Send message to a specific peer."""
-        if peer_id not in self._pools:
-            return False
-        return await self._pools[peer_id].send(message)
+        # Try connection pool first (outgoing connections)
+        if peer_id in self._pools:
+            if await self._pools[peer_id].send(message):
+                return True
+        
+        # Try LAN server (incoming connections)
+        if self._lan_server and peer_id in self._lan_server.connected_peers:
+            if await self._lan_server.send(peer_id, message):
+                return True
+        
+        return False
     
     async def broadcast(self, message: bytes) -> int:
         """Broadcast to all connected peers. Returns count sent."""
         sent = 0
-        for pool in self._pools.values():
+        sent_peers = set()
+        
+        # Send via connection pools (outgoing)
+        for peer_id, pool in self._pools.items():
             if await pool.send(message):
                 sent += 1
+                sent_peers.add(peer_id)
+        
+        # Send via LAN server (incoming connections)
+        if self._lan_server:
+            for peer_id in self._lan_server.connected_peers:
+                if peer_id not in sent_peers:
+                    if await self._lan_server.send(peer_id, message):
+                        sent += 1
+        
         return sent
     
     def get_connected_peers(self) -> List[str]:
         """Get list of connected peer IDs."""
-        return [
-            peer_id for peer_id, pool in self._pools.items()
-            if pool.get_best_transport() is not None
-        ]
+        peers = set()
+        
+        # Outgoing connections
+        for peer_id, pool in self._pools.items():
+            if pool.get_best_transport() is not None:
+                peers.add(peer_id)
+        
+        # Incoming connections via LAN server
+        if self._lan_server:
+            peers.update(self._lan_server.connected_peers)
+        
+        return list(peers)
     
     def get_transport_status(self) -> dict:
         """Get status of all transports."""
@@ -729,7 +999,43 @@ class TransportManager:
             logger.warning("Relay transport failed to connect")
     
     async def _start_lan_discovery(self):
-        """Start mDNS discovery for LAN peers."""
+        """Start LAN transport: WebSocket server + mDNS discovery."""
+        config = self.config.get_config(TransportType.LAN)
+        port = config.get("port", 11450)
+        
+        # Start the WebSocket server first - THIS IS CRITICAL
+        # Without this, peers can discover us but can't connect
+        self._lan_server = LANServer(
+            node_id=self.node_id,
+            mesh_id=self.mesh_id,
+            host="0.0.0.0",
+            port=port,
+        )
+        
+        # Handle incoming connections from peers
+        def handle_peer_connected(peer_id: str, ws):
+            logger.info(f"LAN server: peer {peer_id} connected")
+            # Create a server-side transport wrapper for this peer
+            # Note: For server-side connections, we track them differently
+            # The LANServer handles sending directly
+        
+        def handle_peer_disconnected(peer_id: str):
+            logger.info(f"LAN server: peer {peer_id} disconnected")
+        
+        def handle_message(peer_id: str, data: bytes):
+            if self._message_handler:
+                self._message_handler(peer_id, data)
+        
+        self._lan_server.on_peer_connected(handle_peer_connected)
+        self._lan_server.on_peer_disconnected(handle_peer_disconnected)
+        self._lan_server.on_message(handle_message)
+        
+        if await self._lan_server.start():
+            logger.info(f"LAN WebSocket server listening on port {port}")
+        else:
+            logger.warning("Failed to start LAN WebSocket server")
+        
+        # Start mDNS discovery for finding peers
         try:
             self._zeroconf = Zeroconf()
             
@@ -776,7 +1082,7 @@ class TransportManager:
             
             # Connect via LAN
             config = self.config.get_config(TransportType.LAN)
-            transport = LANTransport(config)
+            transport = LANTransport(config, node_id=self.node_id, mesh_id=self.mesh_id)
             
             def handle_message(data: bytes):
                 if self._message_handler:
@@ -792,6 +1098,93 @@ class TransportManager:
                 
         except Exception as e:
             logger.warning(f"Failed to connect to discovered peer: {e}")
+    
+    async def _start_wifi_direct(self, is_founder: bool, capabilities: List[str]):
+        """Start WiFi Direct transport."""
+        try:
+            from .wifi_direct import WifiDirectTransport
+            
+            config = self.config.get_config(TransportType.WIFI_DIRECT)
+            self._wifi_direct = WifiDirectTransport(
+                node_id=self.node_id,
+                node_name=config.get("node_name", "Atmosphere"),
+                mesh_id=self.mesh_id,
+                port=config.get("port", 11450),
+                capabilities=capabilities or []
+            )
+            
+            def handle_message(peer_id: str, data: bytes):
+                if self._message_handler:
+                    self._message_handler(peer_id, data)
+            
+            self._wifi_direct.on_message(handle_message)
+            
+            if await self._wifi_direct.start(advertise=is_founder, browse=True):
+                logger.info("WiFi Direct transport started")
+            else:
+                logger.warning("WiFi Direct transport failed to start")
+                
+        except ImportError:
+            logger.debug("WiFi Direct not available")
+        except Exception as e:
+            logger.warning(f"WiFi Direct start failed: {e}")
+    
+    async def _start_ble_mesh(self, is_founder: bool, capabilities: List[str]):
+        """Start BLE Mesh transport."""
+        try:
+            from .ble_mesh import BleMeshTransport
+            
+            config = self.config.get_config(TransportType.BLE_MESH)
+            self._ble_mesh = BleMeshTransport(
+                node_id=self.node_id,
+                node_name=config.get("node_name", "Atmosphere"),
+                mesh_id=self.mesh_id,
+                capabilities=capabilities or [],
+                max_hops=config.get("max_hops", 5)
+            )
+            
+            def handle_message(peer_id: str, data: bytes):
+                if self._message_handler:
+                    self._message_handler(peer_id, data)
+            
+            self._ble_mesh.on_message(handle_message)
+            
+            advertise = is_founder or config.get("advertising", True)
+            scan = config.get("scanning", True)
+            
+            if await self._ble_mesh.start(advertise=advertise, scan=scan):
+                logger.info("BLE Mesh transport started")
+            else:
+                logger.warning("BLE Mesh transport failed to start")
+                
+        except ImportError:
+            logger.debug("BLE Mesh not available (need bleak or pyobjc)")
+        except Exception as e:
+            logger.warning(f"BLE Mesh start failed: {e}")
+    
+    async def _start_matter_bridge(self):
+        """Start Matter bridge connection."""
+        try:
+            from ..integrations.matter import MatterBridge
+            
+            config = self.config.get_config(TransportType.MATTER)
+            bridge_url = config.get("bridge_url", "ws://localhost:5580")
+            
+            self._matter_bridge = MatterBridge(bridge_url)
+            
+            if await self._matter_bridge.connect():
+                logger.info("Matter bridge connected")
+                
+                # Register Matter devices as capabilities
+                devices = await self._matter_bridge.list_devices()
+                logger.info(f"Found {len(devices)} Matter devices")
+            else:
+                logger.warning("Matter bridge connection failed")
+                
+        except ImportError:
+            logger.debug("Matter integration not available")
+        except Exception as e:
+            logger.warning(f"Matter bridge start failed: {e}")
     
     async def _probe_loop(self):
         """Periodically probe connections for optimization."""
