@@ -105,6 +105,28 @@ class CapabilityInfo(BaseModel):
     description: str
     handler: str
     models: List[str] = []
+    keywords: List[str] = []
+    source: str = "local"  # "local", "llamafarm", "mesh"
+
+
+class CapabilityAnnouncementInfo(BaseModel):
+    """Full capability announcement with mesh routing info."""
+    capability_id: str
+    node_id: str
+    node_name: str
+    project_path: str
+    model_actual: str
+    model_family: str
+    model_tier: str
+    label: str
+    description: str
+    keywords: List[str]
+    good_for: List[str]
+    not_good_for: List[str]
+    has_rag: bool
+    specializations: List[str]
+    estimated_latency_ms: float
+    hops: int
 
 
 class MeshStatus(BaseModel):
@@ -137,6 +159,18 @@ async def route_intent(request: RouteRequest):
     
     result = await server.router.route(request.intent)
     
+    # Broadcast routing event to UI WebSocket clients
+    await manager.broadcast({
+        "type": "routing_decision",
+        "event": "route_intent",
+        "intent": request.intent[:100],  # Truncate for UI
+        "action": result.action.value,
+        "capability": result.capability_label,
+        "score": result.composite_score,
+        "method": result.method.value if hasattr(result, 'method') else "unknown",
+        "timestamp": time.time()
+    })
+    
     # Get cost info for the selected node
     node_cost = None
     if result.capability:
@@ -151,8 +185,8 @@ async def route_intent(request: RouteRequest):
     
     return RouteResponse(
         action=result.action.value,
-        capability=result.capability.label if result.capability else None,
-        score=result.score,
+        capability=result.capability_label,
+        score=result.composite_score,
         hops=result.hops,
         next_hop=result.next_hop,
         node_id=server.node.node_id if result.action == RouteAction.PROCESS_LOCAL and server.node else result.via_node
@@ -250,6 +284,18 @@ async def execute_intent(request: ExecuteRequest):
     
     result = await server.executor.execute(request.intent, **request.kwargs)
     
+    # Broadcast execution event to UI WebSocket clients
+    await manager.broadcast({
+        "type": "execution",
+        "event": "execute_intent",
+        "intent": request.intent[:100],
+        "success": result.success,
+        "capability": result.capability,
+        "execution_time_ms": result.execution_time_ms,
+        "node_id": result.node_id,
+        "timestamp": time.time()
+    })
+    
     return ExecuteResponse(
         success=result.success,
         data=result.data,
@@ -322,22 +368,114 @@ async def chat_completions(request: ChatCompletionRequest):
 
 @router.get("/capabilities", response_model=List[CapabilityInfo])
 async def list_capabilities():
-    """List all available capabilities."""
+    """
+    List all available capabilities (local + LlamaFarm).
+    
+    This is a simplified view - use /mesh/capabilities for full details.
+    """
     server = get_server()
     if not server or not server.router:
         raise HTTPException(status_code=503, detail="Server not ready")
     
     caps = []
-    for cap in server.router.local_capabilities.values():
+    
+    # Local capabilities
+    for cap in [entry for entry in server.router.gradient_table.all_entries() if entry.hops == 0]:
         caps.append(CapabilityInfo(
-            id=cap.id,
-            label=cap.label,
-            description=cap.description,
-            handler=cap.handler,
-            models=cap.models
+            id=cap.capability_id,
+            label=cap.capability_label,
+            description="",  # GradientEntry doesn't store description
+            handler="gradient",  # Generic handler
+            models=[],  # GradientEntry doesn't store models
+            keywords=[],  # GradientEntry doesn't store keywords
+            source="local"
         ))
     
+    # LlamaFarm capabilities (discovered dynamically)
+    try:
+        from ..integration.llamafarm import discover_llamafarm_capabilities
+        
+        node_id = server.node.identity.id if server.node else "local"
+        node_name = server.node.identity.name if server.node else "local-node"
+        
+        llamafarm_caps = await discover_llamafarm_capabilities(
+            node_id=node_id,
+            node_name=node_name,
+        )
+        
+        for cap_ann in llamafarm_caps:
+            caps.append(CapabilityInfo(
+                id=cap_ann.capability_id,
+                label=cap_ann.label,
+                description=cap_ann.description,
+                handler="llamafarm",
+                models=[cap_ann.model_actual],
+                keywords=cap_ann.keywords,
+                source="llamafarm"
+            ))
+    except Exception as e:
+        logger.warning(f"Failed to discover LlamaFarm capabilities: {e}")
+    
     return caps
+
+
+@router.get("/mesh/capabilities", response_model=List[CapabilityAnnouncementInfo])
+async def list_mesh_capabilities():
+    """
+    List all capabilities in the mesh (gossip-style view).
+    
+    This includes:
+    - Local LlamaFarm capabilities
+    - Remote capabilities from other nodes (via gossip)
+    
+    Returns full CapabilityAnnouncement details for routing decisions.
+    """
+    server = get_server()
+    if not server:
+        raise HTTPException(status_code=503, detail="Server not ready")
+    
+    announcements = []
+    
+    # Discover local LlamaFarm capabilities
+    try:
+        from ..integration.llamafarm import discover_llamafarm_capabilities
+        
+        node_id = server.node.identity.id if server.node else "local"
+        node_name = server.node.identity.name if server.node else "local-node"
+        
+        local_caps = await discover_llamafarm_capabilities(
+            node_id=node_id,
+            node_name=node_name,
+        )
+        
+        for cap in local_caps:
+            announcements.append(CapabilityAnnouncementInfo(
+                capability_id=cap.capability_id,
+                node_id=cap.node_id,
+                node_name=cap.node_name,
+                project_path=cap.project_path,
+                model_actual=cap.model_actual,
+                model_family=cap.model_family,
+                model_tier=cap.model_tier.value,
+                label=cap.label,
+                description=cap.description,
+                keywords=cap.keywords,
+                good_for=cap.good_for,
+                not_good_for=cap.not_good_for,
+                has_rag=cap.has_rag,
+                specializations=cap.specializations,
+                estimated_latency_ms=cap.estimated_latency_ms,
+                hops=0  # Local
+            ))
+    except Exception as e:
+        logger.error(f"Failed to discover LlamaFarm capabilities: {e}", exc_info=True)
+    
+    # TODO: Add remote capabilities from gradient table (when gossip is implemented)
+    # if server.router and hasattr(server.router, 'gradient_table'):
+    #     for entry in server.router.gradient_table.entries.values():
+    #         ...
+    
+    return announcements
 
 
 @router.get("/mesh/status", response_model=MeshStatus)
@@ -362,9 +500,46 @@ async def mesh_status():
         mesh_name=mesh.name if mesh else None,
         node_count=node_count,
         peer_count=total_peers,
-        capabilities=list(server.router.local_capabilities.keys()) if server.router else [],
+        capabilities=list(server.router.local_capability_ids) if server.router else [],
         is_founder=server.node.is_founder if server.node else False
     )
+
+
+@router.get("/gossip/status")
+async def gossip_status():
+    """Get gossip manager status and trigger manual broadcast."""
+    server = get_server()
+    if not server:
+        raise HTTPException(status_code=503, detail="Server not ready")
+    
+    gossip = server.gossip
+    if not gossip:
+        return {"status": "no_gossip_manager"}
+    
+    return {
+        "running": gossip._running,
+        "local_capabilities": len(gossip._local_capabilities),
+        "local_cap_ids": list(gossip._local_capabilities.keys()),
+        "remote_capabilities": {k: len(v) for k, v in gossip._remote_capabilities.items()},
+        "seen_nonces": len(gossip._seen_nonces),
+        "has_relay": gossip.send_to_relay is not None,
+        "relay_connected": server.relay_client.connected if server.relay_client else False,
+        "gossip_task_alive": gossip._gossip_task is not None and not gossip._gossip_task.done() if gossip._gossip_task else False,
+    }
+
+
+@router.post("/gossip/broadcast")
+async def gossip_broadcast():
+    """Manually trigger a gossip broadcast."""
+    server = get_server()
+    if not server or not server.gossip:
+        raise HTTPException(status_code=503, detail="No gossip manager")
+    
+    await server.gossip.broadcast_capabilities()
+    return {
+        "broadcast": True,
+        "capabilities_sent": len(server.gossip._local_capabilities),
+    }
 
 
 @router.post("/mesh/join", response_model=JoinResponse)
@@ -492,7 +667,7 @@ async def mesh_topology():
         "isLeader": server.node.is_founder if server.node else True,
         "type": "llm",  # Default type
         "triggers": [],
-        "tools": list(server.router.local_capabilities.keys()) if server.router else [],
+        "tools": list(server.router.local_capability_ids) if server.router else [],
         "cost": local_cost,
         "costFactors": factors.to_dict() if factors else None,
     }
@@ -531,37 +706,72 @@ async def mesh_topology():
                     "costFactors": peer_cost_data.get("factors"),
                     "via": "mdns",
                 })
-                # Add link from this node to peer
+                # Add link from this node to peer (LAN via mDNS)
                 links.append({
                     "source": this_node["id"],
                     "target": peer.node_id,
+                    "transport_type": "lan",
+                    "strength": 1.0,
+                    "latency_ms": 10,  # TODO: Get actual latency
                 })
                 added_node_ids.add(peer.node_id)
     
     # Add relay-connected peers
     relay_peers = getattr(server, '_relay_peers', {})
     for node_id, peer_info in relay_peers.items():
-        if node_id not in added_node_ids:
-            peer_cost_data = peer_costs.get(node_id, {})
-            nodes.append({
-                "id": node_id,
-                "name": peer_info.get("name", node_id[:8]),
-                "status": "active",
-                "isLeader": peer_info.get("is_founder", False),
-                "type": "llm",
-                "triggers": [],
-                "tools": peer_info.get("capabilities", []),
-                "cost": peer_cost_data.get("cost"),
-                "costFactors": peer_cost_data.get("factors"),
-                "via": "relay",
-            })
-            # Add link from this node to relay peer
-            links.append({
-                "source": this_node["id"],
-                "target": node_id,
-                "type": "relay",  # Mark as relay connection
-            })
-            added_node_ids.add(node_id)
+        if not node_id or node_id in added_node_ids:
+            continue
+        peer_cost_data = peer_costs.get(node_id, {})
+        nodes.append({
+            "id": node_id,
+            "name": peer_info.get("name", node_id[:8] if node_id else "unknown"),
+            "status": "active",
+            "isLeader": peer_info.get("is_founder", False),
+            "type": "llm",
+            "triggers": [],
+            "tools": peer_info.get("capabilities", []),
+            "cost": peer_cost_data.get("cost"),
+            "costFactors": peer_cost_data.get("factors"),
+            "via": "relay",
+        })
+        # Add link from this node to relay peer
+        links.append({
+            "source": this_node["id"],
+            "target": node_id,
+            "transport_type": "relay",
+            "strength": 0.8,
+            "latency_ms": 50,  # TODO: Get actual latency
+        })
+        added_node_ids.add(node_id)
+    
+    # Add BLE-connected peers
+    if hasattr(server, 'ble_transport') and server.ble_transport:
+        for ble_peer in server.ble_transport.get_peers():
+            if ble_peer.node_id not in added_node_ids:
+                peer_cost_data = peer_costs.get(ble_peer.node_id, {})
+                nodes.append({
+                    "id": ble_peer.node_id,
+                    "name": ble_peer.name,
+                    "status": "active",
+                    "isLeader": False,
+                    "type": "llm",
+                    "triggers": [],
+                    "tools": ble_peer.capabilities,
+                    "cost": peer_cost_data.get("cost"),
+                    "costFactors": peer_cost_data.get("factors"),
+                    "via": "ble",
+                    "rssi": ble_peer.rssi,
+                })
+                # Add link from this node to BLE peer
+                links.append({
+                    "source": this_node["id"],
+                    "target": ble_peer.node_id,
+                    "transport_type": "ble",
+                    "strength": max(0.3, min(1.0, (ble_peer.rssi + 100) / 60)),  # RSSI to strength
+                    "latency_ms": 100,  # Typical BLE latency
+                    "rssi": ble_peer.rssi,
+                })
+                added_node_ids.add(ble_peer.node_id)
     
     return {
         "nodes": nodes,
@@ -593,7 +803,7 @@ async def get_transport_status():
         raise HTTPException(status_code=503, detail="Server not ready")
     
     # Check if resilient transport manager is available
-    resilient_manager = getattr(server, 'resilient_transport', None)
+    # resilient_manager = getattr(server, 'resilient_transport', None)
     
     transports = {
         "node_id": server.node.node_id if server.node else "unknown",
@@ -654,7 +864,7 @@ async def get_transport_status():
     
     # Add relay server connection status
     transports["relay"] = {
-        "connected": bool(server.relay_client and server.relay_client.ws and not server.relay_client.ws.closed),
+        "connected": bool(server.relay_client and server.relay_client.connected),
         "url": getattr(server.config, 'relay_url', None),
         "peer_count": len(getattr(server, '_relay_peers', {})),
     }
@@ -759,7 +969,7 @@ async def generate_invite_token():
     # Get capabilities this mesh offers
     capabilities = []
     if server.router:
-        capabilities = list(server.router.local_capabilities.keys())[:10]  # Limit for QR size
+        capabilities = list(server.router.local_capability_ids)[:10]  # Limit for QR size
     
     # Get mesh public key for verification
     mesh_public_key = mesh_keypair.public_key_b64()
@@ -842,10 +1052,10 @@ async def list_agents():
     agents = []
     
     if server.router:
-        for cap_id, cap in server.router.local_capabilities.items():
+        for cap_id, cap in [(e.capability_id, e) for e in server.router.gradient_table.all_entries() if e.hops == 0]:
             agents.append({
                 "id": f"agent-{cap_id[:8]}",
-                "name": cap.label,
+                "name": cap.capability_label,
                 "status": "running",
                 "capabilities": [cap_id],
                 "uptime": int(time.time()) % 86400,  # Demo uptime
@@ -1270,6 +1480,181 @@ async def open_permission_settings(permission: str = Query(..., description="cam
         raise HTTPException(status_code=500, detail=f"Failed to open settings: {e}")
 
 
+@router.websocket("/mesh/ws")
+async def mesh_websocket_endpoint(websocket: WebSocket):
+    """
+    Relay-compatible WebSocket for LAN mesh connections.
+    
+    Speaks the same protocol as the relay server so Android MeshConnection
+    can connect directly without changes. Handles:
+    - join: Accept peer
+    - broadcast: Process payload (gossip, inference requests)
+    - ping/pong: Keepalive
+    """
+    await websocket.accept()
+    server = get_server()
+    peer_node_id = None
+    peer_name = "unknown"
+    
+    try:
+        # Send welcome - wait for join
+        while True:
+            data = await websocket.receive_json()
+            msg_type = data.get("type")
+            
+            if msg_type == "join":
+                peer_node_id = data.get("node_id", "unknown")
+                peer_name = data.get("name", peer_node_id[:8])
+                logger.info(f"🏠 LAN peer joined: {peer_name} ({peer_node_id})")
+                
+                # Register for transport bridging
+                if server:
+                    server._lan_peers[peer_node_id] = websocket
+                
+                # Send joined confirmation (relay protocol)
+                mesh = server.node.mesh if server and server.node else None
+                await websocket.send_json({
+                    "type": "joined",
+                    "mesh": mesh.name if mesh else "home-mesh",
+                    "mesh_id": mesh.mesh_id if mesh else "default",
+                    "node_count": 2,
+                })
+                
+                # Send peers list (relay protocol)
+                node_id = server.node.node_id if server and server.node else "local"
+                await websocket.send_json({
+                    "type": "peers",
+                    "peers": [{
+                        "node_id": node_id,
+                        "name": server.node.name if server and server.node else "mac",
+                        "capabilities": list(server.router.local_capability_ids)[:10] if server and server.router else [],
+                        "is_founder": True,
+                    }]
+                })
+                
+                # Immediately send gossip (capability announce)
+                if server and server.gossip and server.gossip._local_capabilities:
+                    gossip_msg = server.gossip._build_announce_message()
+                    await websocket.send_json({
+                        "type": "message",
+                        "from": node_id,
+                        "payload": gossip_msg,
+                    })
+                    logger.info(f"🏠 Sent {len(server.gossip._local_capabilities)} capabilities to LAN peer")
+                
+                break
+            elif msg_type == "ping":
+                await websocket.send_json({"type": "pong"})
+            else:
+                await websocket.send_json({"type": "error", "message": "Send join first"})
+        
+        # Main message loop
+        async def handle_messages():
+            while True:
+                data = await websocket.receive_json()
+                msg_type = data.get("type")
+                
+                if msg_type == "ping":
+                    await websocket.send_json({"type": "pong"})
+                
+                elif msg_type == "broadcast":
+                    payload = data.get("payload", {})
+                    payload_type = payload.get("type", "")
+                    
+                    if payload_type == "inference_request" or payload_type == "chat_request" or payload_type == "llm_request":
+                        # Handle inference request — bridge to other transports too
+                        logger.info(f"🏠 LAN inference request from {peer_name}")
+                        if server:
+                            await server._bridge_message(payload, "lan")
+                        try:
+                            prompt = payload.get("prompt", "")
+                            model = payload.get("model")
+                            request_id = payload.get("request_id", "")
+                            
+                            # Route through LlamaFarm discoverable project
+                            response_text = await call_llamafarm_project(prompt, model)
+                            
+                            await websocket.send_json({
+                                "type": "message",
+                                "from": server.node.node_id if server and server.node else "local",
+                                "payload": {
+                                    "type": "llm_response",
+                                    "response": response_text,
+                                    "request_id": request_id,
+                                    "node_id": server.node.node_id if server and server.node else "local",
+                                }
+                            })
+                        except Exception as e:
+                            logger.error(f"LAN inference error: {e}")
+                            await websocket.send_json({
+                                "type": "message",
+                                "from": server.node.node_id if server and server.node else "local",
+                                "payload": {
+                                    "type": "llm_response",
+                                    "error": str(e),
+                                    "request_id": payload.get("request_id", ""),
+                                }
+                            })
+                    
+                    elif payload_type == "capability_announce" and server and server.gossip:
+                        # Handle incoming gossip from peer, bridge to BLE+Relay
+                        try:
+                            await server.gossip.handle_announcement(peer_node_id, payload)
+                            await server._bridge_message(payload, "lan")
+                        except Exception as e:
+                            logger.warning(f"Failed to process LAN gossip: {e}")
+                    
+                    else:
+                        logger.debug(f"Unhandled LAN broadcast: {payload_type}")
+                
+                elif msg_type == "capability_announce" and server and server.gossip:
+                    # Direct gossip (not wrapped in broadcast)
+                    try:
+                        await server.gossip.handle_announcement(peer_node_id, data)
+                    except Exception as e:
+                        logger.warning(f"Failed to process LAN gossip: {e}")
+                
+                else:
+                    logger.debug(f"Unknown LAN message: {msg_type}")
+        
+        async def send_gossip_updates():
+            """Periodically send gossip updates to LAN peer."""
+            node_id = server.node.node_id if server and server.node else "local"
+            while True:
+                await asyncio.sleep(30)
+                if server and server.gossip and server.gossip._local_capabilities:
+                    try:
+                        gossip_msg = server.gossip._build_announce_message()
+                        await websocket.send_json({
+                            "type": "message",
+                            "from": node_id,
+                            "payload": gossip_msg,
+                        })
+                    except Exception:
+                        break
+                
+                # Ping
+                try:
+                    await websocket.send_json({"type": "ping"})
+                except Exception:
+                    break
+        
+        await asyncio.gather(
+            handle_messages(),
+            send_gossip_updates(),
+            return_exceptions=True
+        )
+        
+    except WebSocketDisconnect:
+        logger.info(f"🏠 LAN peer disconnected: {peer_name}")
+    except Exception as e:
+        logger.error(f"LAN WebSocket error: {e}")
+    finally:
+        # Unregister from transport bridge
+        if server and peer_node_id:
+            server._lan_peers.pop(peer_node_id, None)
+
+
 @router.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     """
@@ -1294,7 +1679,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     "mesh_name": mesh.name if mesh else None,
                     "node_count": len(mesh.founding_members) if mesh else 0,
                     "peer_count": len(server.discovery.peers) if server.discovery else 0,
-                    "capabilities": list(server.router.local_capabilities.keys()) if server.router else [],
+                    "capabilities": list(server.router.local_capability_ids) if server.router else [],
                 }
             })
             
@@ -1410,6 +1795,10 @@ async def websocket_endpoint(websocket: WebSocket):
                 try:
                     await asyncio.sleep(10)  # Check every 10 seconds
                     
+                    # Check if websocket is still connected
+                    if websocket.client_state.name != "CONNECTED":
+                        break
+                    
                     now = time.time()
                     
                     # Broadcast cost update every 30 seconds
@@ -1432,7 +1821,8 @@ async def websocket_endpoint(websocket: WebSocket):
                             await websocket.send_json(cost_message)
                             last_cost_broadcast = now
                         except Exception as e:
-                            logger.error(f"Failed to send cost update: {e}")
+                            logger.debug(f"Failed to send cost update: {e}")
+                            break
                     
                     # Send ping to keep connection alive
                     await websocket.send_json({"type": "ping", "timestamp": now})
@@ -1440,7 +1830,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 except WebSocketDisconnect:
                     break
                 except Exception as e:
-                    logger.error(f"Periodic update error: {e}")
+                    # Don't log as error - just exit silently when connection closes
                     break
         
         # Run both message handler and periodic updates concurrently
@@ -1455,6 +1845,29 @@ async def websocket_endpoint(websocket: WebSocket):
     except Exception as e:
         logger.error(f"WebSocket error: {e}")
         manager.disconnect(websocket)
+
+
+async def call_llamafarm_project(prompt: str, model: str = None) -> str:
+    """Call LlamaFarm via the discoverable/atmosphere-universal project."""
+    import httpx
+    project = "atmosphere-universal"
+    if model and model != "auto":
+        project = model
+    
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        resp = await client.post(
+            f"http://localhost:14345/v1/projects/discoverable/{project}/chat/completions",
+            json={
+                "messages": [{"role": "user", "content": prompt}],
+                "stream": False
+            }
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            choices = data.get("choices", [])
+            if choices:
+                return choices[0].get("message", {}).get("content", "No response")
+        raise Exception(f"LlamaFarm project returned status {resp.status_code}")
 
 
 async def call_llamafarm_llm(prompt: str, model: str = None) -> str:
@@ -2076,7 +2489,7 @@ async def get_network_status():
     relay_connected = False
     relay_url = None
     if server and server.relay_client:
-        relay_connected = server.relay_client.ws is not None and not server.relay_client.ws.closed
+        relay_connected = server.relay_client.connected
         relay_url = getattr(server.config, 'relay_url', None)
     
     # Get endpoint registry status (if gossip is using it)
@@ -2348,16 +2761,16 @@ async def get_routing_table():
     routing_stats = None
     
     if server.gossip:
-        routing_table = server.gossip.get_routing_table()
-        routes = routing_table.export()
-        routing_stats = routing_table.stats()
+        entries = server.gossip.gradient_table.all_entries()
+        routes = [e.to_dict() for e in entries]
+        routing_stats = {"count": len(entries)}
     
     # Also include gradient table info for comparison
     gradient_info = None
     if server.router:
         gradient_info = {
             "entries": len(server.router.gradient_table),
-            "capabilities": list(server.router.local_capabilities.keys()),
+            "capabilities": list(server.router.local_capability_ids),
         }
     
     return {
@@ -2454,8 +2867,7 @@ async def get_transports():
     # Relay transport status
     relay_connected = (
         server.relay_client is not None and
-        server.relay_client.ws is not None and
-        not server.relay_client.ws.closed
+        server.relay_client.connected
     )
     relay_peers = getattr(server, '_relay_peers', {})
     
@@ -2485,12 +2897,19 @@ async def get_transports():
     
     # Routing table transport breakdown
     if server.gossip:
-        routing_table = server.gossip.get_routing_table()
-        transports["routing"] = routing_table.get_transport_status()
+        entries = server.gossip.gradient_table.all_entries()
+        hops_dist = {}
+        for e in entries:
+            hops_dist[e.hops] = hops_dist.get(e.hops, 0) + 1
+            
+        transports["routing"] = {
+            "entry_count": len(entries),
+            "hops_distribution": hops_dist
+        }
     
     # Resilient mesh status (if available)
-    if hasattr(server, 'mesh_connection') and server.mesh_connection:
-        mesh_status = server.mesh_connection.get_status()
+    # if hasattr(server, 'mesh_connection') and server.mesh_connection:
+        # mesh_status = server.mesh_connection.get_status()
         transports["resilient_mesh"] = mesh_status
     
     transports["timestamp"] = time.time()
@@ -2516,3 +2935,187 @@ async def get_gossip_stats():
         "known_nodes": list(server.gossip.known_nodes()),
         "timestamp": time.time()
     }
+
+
+# ============ BLE Pairing Endpoints ============
+
+class BlePairRequest(BaseModel):
+    """Request to initiate BLE pairing."""
+    device_id: str
+    device_name: str = ""
+
+
+@router.get("/ble/pairing")
+async def get_ble_pairing_state():
+    """
+    Get current BLE pairing state.
+    
+    Returns active pairing sessions and any pending code displays.
+    """
+    server = get_server()
+    if not server:
+        raise HTTPException(status_code=503, detail="Server not ready")
+    
+    # Check if BLE pairing manager exists
+    pairing_manager = getattr(server, 'ble_pairing_manager', None)
+    if not pairing_manager:
+        return {
+            "state": "IDLE",
+            "available": False,
+            "message": "BLE pairing not available on this platform"
+        }
+    
+    # Get active sessions
+    sessions = []
+    active_code = None
+    peer_name = ""
+    state = "IDLE"
+    
+    for peer_id, session in pairing_manager.sessions.items():
+        session_info = {
+            "peer_id": peer_id,
+            "peer_name": session.peer_name,
+            "state": session.state.name if hasattr(session.state, 'name') else str(session.state),
+        }
+        
+        # Check if there's a code to display
+        if session.state == 3:  # CODE_DISPLAY state
+            active_code = session.code
+            peer_name = session.peer_name
+            state = "CODE_DISPLAY"
+        elif session.state == 2:  # INITIATING
+            state = "INITIATING"
+        elif session.state == 4:  # EXCHANGING
+            state = "EXCHANGING"
+        elif session.state == 5:  # COMPLETED
+            state = "COMPLETED"
+        
+        sessions.append(session_info)
+    
+    # Get nearby devices if BLE transport is available
+    nearby_devices = []
+    if hasattr(server, 'ble_transport') and server.ble_transport:
+        for peer in server.ble_transport.get_peers():
+            nearby_devices.append({
+                "id": peer.node_id,
+                "name": peer.name,
+                "rssi": peer.rssi,
+                "platform": peer.platform,
+            })
+    
+    return {
+        "state": state,
+        "code": active_code,
+        "peer_name": peer_name,
+        "sessions": sessions,
+        "nearby_devices": nearby_devices,
+        "available": True
+    }
+
+
+@router.post("/ble/scan")
+async def start_ble_scan():
+    """
+    Trigger a BLE scan for nearby Atmosphere nodes.
+    """
+    server = get_server()
+    if not server:
+        raise HTTPException(status_code=503, detail="Server not ready")
+    
+    if not hasattr(server, 'ble_transport') or not server.ble_transport:
+        return {
+            "success": False,
+            "devices": [],
+            "message": "BLE transport not available"
+        }
+    
+    # The BLE transport continuously scans, so just return current peers
+    devices = []
+    for peer in server.ble_transport.get_peers():
+        devices.append({
+            "id": peer.node_id,
+            "name": peer.name,
+            "rssi": peer.rssi,
+            "platform": peer.platform,
+        })
+    
+    return {
+        "success": True,
+        "devices": devices,
+        "count": len(devices)
+    }
+
+
+@router.post("/ble/pair")
+async def initiate_ble_pairing(request: BlePairRequest):
+    """
+    Initiate BLE pairing with a discovered device.
+    """
+    server = get_server()
+    if not server:
+        raise HTTPException(status_code=503, detail="Server not ready")
+    
+    pairing_manager = getattr(server, 'ble_pairing_manager', None)
+    if not pairing_manager:
+        raise HTTPException(status_code=503, detail="BLE pairing not available")
+    
+    try:
+        success = await pairing_manager.initiate_pairing(
+            request.device_id, 
+            request.device_name
+        )
+        return {
+            "success": success,
+            "message": "Pairing initiated" if success else "Already pairing with this device"
+        }
+    except Exception as e:
+        logger.error(f"BLE pairing failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/ble/confirm")
+async def confirm_ble_pairing():
+    """
+    Confirm the BLE pairing code matches.
+    """
+    server = get_server()
+    if not server:
+        raise HTTPException(status_code=503, detail="Server not ready")
+    
+    pairing_manager = getattr(server, 'ble_pairing_manager', None)
+    if not pairing_manager:
+        raise HTTPException(status_code=503, detail="BLE pairing not available")
+    
+    # Find active pairing session
+    for peer_id, session in pairing_manager.sessions.items():
+        if session.state == 3:  # CODE_DISPLAY
+            try:
+                success = await pairing_manager.confirm_code(peer_id)
+                return {"success": success}
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+    
+    return {"success": False, "message": "No active pairing session"}
+
+
+@router.post("/ble/reject")
+async def reject_ble_pairing():
+    """
+    Reject the current BLE pairing.
+    """
+    server = get_server()
+    if not server:
+        raise HTTPException(status_code=503, detail="Server not ready")
+    
+    pairing_manager = getattr(server, 'ble_pairing_manager', None)
+    if not pairing_manager:
+        raise HTTPException(status_code=503, detail="BLE pairing not available")
+    
+    # Find and reject active pairing session
+    for peer_id in list(pairing_manager.sessions.keys()):
+        try:
+            await pairing_manager.reject_pairing(peer_id, "user_rejected")
+        except Exception as e:
+            logger.warning(f"Error rejecting pairing: {e}")
+    
+    return {"success": True}

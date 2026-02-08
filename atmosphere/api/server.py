@@ -94,6 +94,14 @@ class AtmosphereServer:
         self._running = False
         self._relay_task: Optional[asyncio.Task] = None
         self._relay_peers: dict = {}  # node_id -> peer info from relay
+        
+        # Transport bridge: dedup cache for cross-transport forwarding
+        from collections import OrderedDict
+        self._seen_nonces: OrderedDict = OrderedDict()  # nonce -> timestamp
+        self._seen_nonces_max = 1000
+        
+        # LAN WebSocket peers (connected via /api/mesh/ws)
+        self._lan_peers: dict = {}  # node_id -> websocket
     
     async def initialize(self) -> None:
         """Initialize all components."""
@@ -572,34 +580,22 @@ class AtmosphereServer:
             self.ble_transport.on_message = on_ble_message
             self.ble_transport.on_peer_discovered = on_ble_peer_discovered
             
-            # Build local credentials for pairing
-            local_creds = PairingCredentials(
+            # Create pairing manager (new system with delegation support)
+            from ..pairing.ble_pair import BlePairingManager as NewBlePairingManager
+            mesh = self.node.mesh if self.node else None
+            mesh_keypair = getattr(mesh, '_master_keypair', None) if mesh else None
+            is_founder = mesh.can_issue_certificates() if mesh and hasattr(mesh, 'can_issue_certificates') else bool(mesh_keypair)
+            
+            self.ble_pairing_manager = NewBlePairingManager(
                 node_id=self.node.node_id,
-                node_name=self.node.name,
-                mesh_id=self.node.mesh.mesh_id if self.node.mesh else "",
-                relay_token="",  # TODO: Get from relay client if connected
-                relay_url=getattr(self.config, 'relay_url', ""),
-                local_endpoints=[{
-                    "ip": self.config.server.host,
-                    "port": self.config.server.port
-                }],
-                capabilities=list(self.router.local_capability_ids) if self.router else []
+                mesh_id=mesh.mesh_id if mesh else "default",
+                is_founder=is_founder,
+                mesh_keypair=mesh_keypair,
+                own_keypair=getattr(self.node.identity, '_keypair', None) if self.node else None,
             )
             
-            # Create pairing manager
-            self.ble_pairing_manager = BlePairingManager(
-                local_credentials=local_creds,
-                on_code_display=self._on_pairing_code_display,
-                on_pairing_complete=self._on_pairing_complete,
-                on_pairing_failed=self._on_pairing_failed
-            )
-            
-            # Integrate pairing with transport
-            integrate_pairing_with_transport(self.ble_transport, self.ble_pairing_manager)
-            
-            # Start transport and pairing manager
+            # Start transport
             await self.ble_transport.start()
-            self.ble_pairing_manager.start()
             
             logger.info(f"✅ BLE transport started: {self.node.name} ({self.ble_transport.node_id})")
             
@@ -640,6 +636,173 @@ class AtmosphereServer:
             "reason": reason
         })
     
+    async def _bridge_message(self, msg: dict, source_transport: str) -> None:
+        """
+        Forward a message to all transports EXCEPT the one it came from.
+        
+        This is the heart of multi-transport mesh: BLE↔LAN↔Relay bridging.
+        Uses nonce-based dedup to prevent broadcast storms.
+        
+        Args:
+            msg: The message dict (must have 'nonce' or we add one)
+            source_transport: "ble", "lan", "relay" — don't send back to source
+        """
+        import json as _json
+        import secrets as _secrets
+        
+        # Ensure nonce for dedup
+        nonce = msg.get("nonce")
+        if not nonce:
+            nonce = _secrets.token_hex(8)
+            msg["nonce"] = nonce
+        
+        # Dedup check
+        if nonce in self._seen_nonces:
+            return
+        self._seen_nonces[nonce] = time.time()
+        # Evict old entries
+        while len(self._seen_nonces) > self._seen_nonces_max:
+            self._seen_nonces.popitem(last=False)
+        
+        # Check TTL
+        ttl = msg.get("ttl", 5)
+        if ttl <= 0:
+            return
+        msg["ttl"] = ttl - 1
+        msg["hops"] = msg.get("hops", 0) + 1
+        
+        node_id = self.node.node_id if self.node else "local"
+        targets = []
+        
+        # Forward to RELAY (if not from relay)
+        if source_transport != "relay" and self.relay_client:
+            try:
+                await self._send_to_relay({
+                    "type": "broadcast",
+                    "payload": msg
+                })
+                targets.append("relay")
+            except Exception as e:
+                logger.debug(f"Bridge→relay failed: {e}")
+        
+        # Forward to BLE (if not from BLE)
+        if source_transport != "ble" and self.ble_transport:
+            try:
+                from .routes import _json_module
+                ble_bytes = _json.dumps(msg).encode('utf-8')
+                from ..transport.ble_mac import MessageType as BleMessageType
+                await self.ble_transport.send(ble_bytes, BleMessageType.DATA)
+                targets.append("ble")
+            except Exception as e:
+                logger.debug(f"Bridge→ble failed: {e}")
+        
+        # Forward to LAN WebSocket peers (if not from LAN)
+        if source_transport != "lan" and self._lan_peers:
+            relay_wrapped = {
+                "type": "message",
+                "from": node_id,
+                "payload": msg,
+            }
+            for peer_id, ws in list(self._lan_peers.items()):
+                try:
+                    await ws.send_json(relay_wrapped)
+                    targets.append(f"lan:{peer_id[:8]}")
+                except Exception as e:
+                    logger.debug(f"Bridge→lan:{peer_id[:8]} failed: {e}")
+                    self._lan_peers.pop(peer_id, None)
+        
+        if targets:
+            logger.info(f"🌉 Bridged {msg.get('type','?')} from {source_transport} → {', '.join(targets)}")
+
+    async def _handle_resilient_message(self, source_id: str, payload: bytes) -> None:
+        """
+        Handle incoming message from BLE transport.
+        
+        Decodes the payload and processes it like a relay message:
+        gossip announcements, inference requests, etc.
+        """
+        try:
+            import json as _json
+            
+            # BLE messages may have an 8-byte binary header — strip it
+            if len(payload) > 8 and payload[0:1] not in (b'{', b'['):
+                # Try stripping the 8-byte header
+                payload = payload[8:]
+            
+            try:
+                text = payload.decode('utf-8')
+                msg = _json.loads(text)
+            except (UnicodeDecodeError, _json.JSONDecodeError):
+                # Might be CBOR
+                try:
+                    import cbor2
+                    msg = cbor2.loads(payload)
+                except Exception:
+                    logger.debug(f"Cannot decode BLE payload ({len(payload)} bytes)")
+                    return
+            msg_type = msg.get("type", "")
+            
+            logger.info(f"BLE message from {source_id}: type={msg_type}")
+            
+            if msg_type in ("capability_announce", "gossip.announce", "capability.announce"):
+                # Gossip announcement via BLE
+                if self.gossip:
+                    node_id = msg.get("node_id", source_id)
+                    await self.gossip.handle_announcement(node_id, msg)
+                    logger.info(f"Processed BLE gossip from {node_id}")
+                    # Bridge to Relay + LAN
+                    await self._bridge_message(msg, "ble")
+            
+            elif msg_type in ("inference_request", "chat_request", "llm_request"):
+                # Inference request via BLE — process locally AND bridge
+                await self._bridge_message(msg, "ble")
+                prompt = msg.get("prompt", "")
+                model = msg.get("model")
+                request_id = msg.get("request_id", "")
+                
+                from .routes import call_llamafarm_project
+                response_text = await call_llamafarm_project(prompt, model)
+                
+                # Send response back via BLE
+                response_msg = _json.dumps({
+                    "type": "llm_response",
+                    "response": response_text,
+                    "request_id": request_id,
+                    "node_id": self.node.node_id if self.node else "local",
+                }).encode('utf-8')
+                
+                if self.ble_transport:
+                    from ..transport.ble_mac import MessageType as BleMessageType
+                    await self.ble_transport.send(response_msg, BleMessageType.DATA)
+                    logger.info(f"Sent BLE inference response for request {request_id}")
+            
+            elif msg_type in ("pair_request", "pair_confirm"):
+                # BLE proximity pairing
+                if self.ble_pairing_manager:
+                    from ..pairing.ble_pair import BlePairingManager
+                    response = await self.ble_pairing_manager.handle_ble_pairing_message(source_id, msg)
+                    if response and self.ble_transport:
+                        response_bytes = _json.dumps(response).encode('utf-8')
+                        from ..transport.ble_mac import MessageType as BleMessageType
+                        await self.ble_transport.send(response_bytes, BleMessageType.DATA)
+                        logger.info(f"Sent pairing response to {source_id}: {response.get('type')}")
+            
+            elif msg_type == "hello":
+                # Peer hello — send our gossip back
+                if self.gossip and self.gossip._local_capabilities:
+                    gossip_msg = self.gossip._build_announce_message()
+                    gossip_bytes = _json.dumps(gossip_msg).encode('utf-8')
+                    if self.ble_transport:
+                        from ..transport.ble_mac import MessageType as BleMessageType
+                        await self.ble_transport.send(gossip_bytes, BleMessageType.CAPABILITY)
+                        logger.info(f"Sent gossip to BLE peer {source_id}")
+            
+            else:
+                logger.debug(f"Unhandled BLE message type: {msg_type}")
+                
+        except Exception as e:
+            logger.error(f"Error handling BLE message: {e}")
+
     async def _connect_to_relay(self) -> None:
         """Connect to relay server for NAT traversal and remote mesh access."""
         relay_url = getattr(self.config, 'relay_url', None)
@@ -896,6 +1059,8 @@ class AtmosphereServer:
                     try:
                         await self.gossip.handle_announcement(from_node, payload)
                         logger.info(f"Processed capability announcement from {from_node} via relay")
+                        # Bridge gossip to BLE + LAN peers
+                        await self._bridge_message(payload, "relay")
                     except Exception as e:
                         logger.warning(f"Failed to process capability announcement from {from_node}: {e}")
                 

@@ -24,18 +24,24 @@ class MeshToken:
     
     Tokens are:
     - Issued by mesh founders (who hold signing keys)
+    - OR issued by delegates with can_invite capability (delegation chain)
     - Time-limited (default 24h, max 7 days)
     - Bound to a specific node_id (optional, for invites)
     - Scoped to capabilities (what the node can do)
+    
+    Delegation chain: When a non-founder issues a token, the chain records
+    each issuer in the path back to the founder. Any node can verify by
+    walking the chain.
     """
     mesh_id: str
     node_id: Optional[str]  # None = open invite (any node)
     issued_at: int
     expires_at: int
     capabilities: List[str]
-    issuer_id: str  # Node ID of the founder who issued
+    issuer_id: str  # Node ID of the issuer (founder or delegate)
     nonce: str  # Random to prevent replay
     signature: str  # Ed25519 signature (base64)
+    delegation_chain: Optional[List[dict]] = None  # Chain of delegations back to founder
     
     @classmethod
     def create(
@@ -128,7 +134,7 @@ class MeshToken:
     
     def to_dict(self) -> dict:
         """Convert to dictionary for JSON serialization."""
-        return {
+        d = {
             "mesh_id": self.mesh_id,
             "node_id": self.node_id,
             "issued_at": self.issued_at,
@@ -138,6 +144,9 @@ class MeshToken:
             "nonce": self.nonce,
             "signature": self.signature,
         }
+        if self.delegation_chain:
+            d["delegation_chain"] = self.delegation_chain
+        return d
     
     @classmethod
     def from_dict(cls, data: dict) -> "MeshToken":
@@ -151,7 +160,64 @@ class MeshToken:
             issuer_id=data["issuer_id"],
             nonce=data["nonce"],
             signature=data["signature"],
+            delegation_chain=data.get("delegation_chain"),
         )
+    
+    @classmethod
+    def create_delegated(
+        cls,
+        mesh_id: str,
+        delegate_keypair: "KeyPair",
+        delegate_id: str,
+        delegate_token: "MeshToken",
+        node_id: Optional[str] = None,
+        capabilities: Optional[List[str]] = None,
+        ttl_seconds: int = 86400,
+    ) -> "MeshToken":
+        """
+        Create a sub-token issued by a delegate (non-founder).
+        
+        Rules:
+        - Delegate must have 'can_invite' in their own token
+        - Sub-token capabilities must be subset of delegate's capabilities
+        - Sub-token cannot include 'can_invite' unless delegate has 'can_delegate_invite'
+        - Delegation chain is extended with the delegate's info
+        
+        Raises ValueError if delegation rules are violated.
+        """
+        # Validate delegate has invite authority
+        if "can_invite" not in delegate_token.capabilities:
+            raise ValueError("Delegate does not have 'can_invite' capability")
+        
+        # Determine allowed capabilities
+        requested = capabilities or ["participant"]
+        allowed = set(delegate_token.capabilities) - {"can_delegate_invite"}
+        if "can_invite" in requested and "can_delegate_invite" not in delegate_token.capabilities:
+            raise ValueError("Delegate cannot grant 'can_invite' without 'can_delegate_invite'")
+        
+        # Filter to subset of delegate's capabilities
+        granted = [c for c in requested if c in allowed or c == "can_invite"]
+        if not granted:
+            granted = ["participant"]
+        
+        # Build delegation chain
+        chain = list(delegate_token.delegation_chain or [])
+        chain.append({
+            "issuer_id": delegate_id,
+            "issuer_capabilities": delegate_token.capabilities,
+            "signature": delegate_token.signature,  # Proves delegate's own token is valid
+        })
+        
+        token = cls.create(
+            mesh_id=mesh_id,
+            issuer_keypair=delegate_keypair,
+            issuer_id=delegate_id,
+            node_id=node_id,
+            capabilities=granted,
+            ttl_seconds=ttl_seconds,
+        )
+        token.delegation_chain = chain
+        return token
     
     def encode(self) -> str:
         """Encode token to compact string for QR codes."""
@@ -240,7 +306,7 @@ class TokenStore:
     
     def __init__(self):
         self._mesh_keys: dict[str, bytes] = {}  # mesh_id -> public key
-        self._used_nonces: set[str] = set()  # Prevent replay
+        self._used_nonces: dict[str, str] = {}  # nonce -> node_id (allows same node to reconnect)
         self._nonce_expiry: dict[str, int] = {}  # nonce -> expires_at
     
     def register_mesh(self, mesh_id: str, public_key: bytes, founder_proof: str) -> bool:
@@ -284,9 +350,12 @@ class TokenStore:
         if token.node_id and token.node_id != node_id:
             return False, "Token bound to different node"
         
-        # Check replay (nonce already used)
+        # Check replay (nonce already used) - but allow same node to reconnect
         if token.nonce in self._used_nonces:
-            return False, "Token already used (replay)"
+            existing_node = self._used_nonces[token.nonce]
+            if existing_node != node_id:
+                return False, "Token already used by another node (replay)"
+            # Same node reconnecting - allowed
         
         # Get mesh public key
         mesh_key = self.get_mesh_key(token.mesh_id)
@@ -297,8 +366,8 @@ class TokenStore:
         if not token.verify(mesh_key):
             return False, "Invalid signature"
         
-        # Mark nonce as used
-        self._used_nonces.add(token.nonce)
+        # Mark nonce as used (store node_id to allow reconnection)
+        self._used_nonces[token.nonce] = node_id
         self._nonce_expiry[token.nonce] = token.expires_at
         
         return True, ""
@@ -311,5 +380,5 @@ class TokenStore:
             if exp < now
         ]
         for nonce in expired:
-            self._used_nonces.discard(nonce)
+            self._used_nonces.pop(nonce, None)
             del self._nonce_expiry[nonce]

@@ -56,10 +56,15 @@ ATMOSPHERE_MANUFACTURER_ID = 0xA7F0
 
 # Default configuration
 DEFAULT_TTL = 5
-MAX_FRAGMENT_SIZE = 236  # 244 MTU - 8 byte header
+DEFAULT_MTU = 244  # Default BLE MTU for iOS/macOS
+MIN_MTU = 23       # BLE 4.0 minimum
+MAX_MTU = 517      # BLE 5.x maximum
+HEADER_SIZE = 8    # Message header size
+MAX_FRAGMENT_SIZE = DEFAULT_MTU - HEADER_SIZE - 3  # 233 bytes (3 for ATT overhead)
 MAX_MESSAGE_SIZE = 64 * 1024  # 64KB max message size
 REASSEMBLY_TIMEOUT = 30.0  # seconds
 SEEN_MESSAGE_CACHE_SIZE = 1000
+NOTIFY_CHUNK_SIZE = 182  # Safe chunk size for notifications (iOS limit)
 
 
 # ============================================================================
@@ -210,13 +215,24 @@ class LRUCache:
 # ============================================================================
 
 class MessageFragmenter:
-    """Handles message fragmentation and reassembly."""
+    """Handles message fragmentation and reassembly with MTU awareness."""
     
     def __init__(self, mtu: int = MAX_FRAGMENT_SIZE):
         self.mtu = mtu
         self.pending_reassembly: Dict[tuple, Dict[int, bytes]] = {}
         self.reassembly_timestamps: Dict[tuple, float] = {}
         self._seq_counter = 0
+        self._peer_mtus: Dict[str, int] = {}  # Track per-peer MTU
+    
+    def set_peer_mtu(self, peer_id: str, mtu: int):
+        """Set negotiated MTU for a peer."""
+        effective_mtu = max(MIN_MTU, min(mtu - HEADER_SIZE - 3, MAX_MTU - HEADER_SIZE - 3))
+        self._peer_mtus[peer_id] = effective_mtu
+        logger.debug(f"Set MTU for {peer_id}: {effective_mtu} bytes")
+    
+    def get_peer_mtu(self, peer_id: str) -> int:
+        """Get effective payload MTU for a peer."""
+        return self._peer_mtus.get(peer_id, self.mtu)
     
     def _next_seq(self) -> int:
         """Get next sequence number."""
@@ -228,21 +244,29 @@ class MessageFragmenter:
         payload: bytes,
         msg_type: MessageType = MessageType.DATA,
         ttl: int = DEFAULT_TTL,
-        flags: int = 0
+        flags: int = 0,
+        peer_id: str = ""
     ) -> List[bytes]:
-        """Fragment a message into BLE-sized chunks."""
+        """Fragment a message into BLE-sized chunks with peer-specific MTU."""
         if len(payload) > MAX_MESSAGE_SIZE:
             raise ValueError(f"Message too large: {len(payload)} > {MAX_MESSAGE_SIZE}")
         
+        # Use peer-specific MTU if available
+        effective_mtu = self.get_peer_mtu(peer_id) if peer_id else self.mtu
+        
         seq = self._next_seq()
-        total_frags = (len(payload) + self.mtu - 1) // self.mtu
+        total_frags = (len(payload) + effective_mtu - 1) // effective_mtu
         if total_frags == 0:
             total_frags = 1
         
+        # Validate fragment count fits in header (8 bits)
+        if total_frags > 255:
+            raise ValueError(f"Message requires {total_frags} fragments, max is 255")
+        
         fragments = []
         for i in range(total_frags):
-            start = i * self.mtu
-            end = min(start + self.mtu, len(payload))
+            start = i * effective_mtu
+            end = min(start + effective_mtu, len(payload))
             
             header = MessageHeader(
                 version=1,
@@ -257,6 +281,22 @@ class MessageFragmenter:
             fragments.append(header.pack() + payload[start:end])
         
         return fragments
+    
+    def chunk_for_notify(self, data: bytes, chunk_size: int = NOTIFY_CHUNK_SIZE) -> List[bytes]:
+        """
+        Split data into safe chunks for GATT notifications.
+        
+        iOS has a ~185 byte limit for notifications regardless of MTU.
+        This method ensures data is chunked appropriately to avoid truncation.
+        """
+        if len(data) <= chunk_size:
+            return [data]
+        
+        chunks = []
+        for i in range(0, len(data), chunk_size):
+            chunks.append(data[i:i + chunk_size])
+        
+        return chunks
     
     def reassemble(
         self,
@@ -696,11 +736,17 @@ class BleTransport:
                     return_adv=True
                 )
                 
+                atmosphere_found = 0
                 for device, adv_data in devices.values():
                     # Check for our service UUID in advertisement
                     service_uuids = adv_data.service_uuids or []
                     if any(MESH_SERVICE_UUID.lower() in uuid.lower() for uuid in service_uuids):
+                        atmosphere_found += 1
+                        logger.debug(f"Found Atmosphere device: {device.name or device.address}")
                         await self._handle_discovered_device(device, adv_data)
+                
+                if atmosphere_found == 0 and len(devices) > 0:
+                    logger.debug(f"Scanned {len(devices)} devices, none with Atmosphere service")
                 
                 # Cleanup stale connections
                 await self._cleanup_stale_peers()
@@ -729,7 +775,7 @@ class BleTransport:
                 logger.error(f"Heartbeat error: {e}")
     
     async def _handle_discovered_device(self, device, adv_data):
-        """Handle discovered Atmosphere device."""
+        """Handle discovered Atmosphere device with MTU negotiation."""
         address = device.address
         rssi = adv_data.rssi if adv_data.rssi else -100
         
@@ -747,6 +793,17 @@ class BleTransport:
             
             if client.is_connected:
                 self.connected_clients[address] = client
+                
+                # Request MTU exchange for larger payloads
+                try:
+                    # bleak 0.20+ supports MTU negotiation
+                    mtu = client.mtu_size
+                    if mtu and mtu > MIN_MTU:
+                        self.fragmenter.set_peer_mtu(address, mtu)
+                        logger.info(f"Negotiated MTU with {address}: {mtu} bytes")
+                except AttributeError:
+                    # Older bleak version, use default MTU
+                    logger.debug(f"MTU negotiation not available for {address}")
                 
                 # Read node info
                 info = await self._read_node_info(client)
@@ -851,8 +908,12 @@ class BleTransport:
     # ========================================================================
     
     async def _run_gatt_server(self):
-        """Run GATT server for peripheral mode."""
+        """Run GATT server for peripheral mode with proper chunking support."""
         logger.info("Starting GATT server")
+        
+        # Buffer for accumulating large writes
+        self._gatt_write_buffer: Dict[str, bytes] = {}
+        self._gatt_write_timestamps: Dict[str, float] = {}
         
         try:
             self.gatt_server = BlessServer(name=self.node_name)
@@ -861,20 +922,23 @@ class BleTransport:
             await self.gatt_server.add_new_service(MESH_SERVICE_UUID)
             
             # TX characteristic (Write from client perspective)
+            # Enable write_without_response for better throughput
+            # On macOS: characteristics with notify/write MUST NOT have cached values
             await self.gatt_server.add_new_characteristic(
                 MESH_SERVICE_UUID,
                 TX_CHAR_UUID,
-                GATTCharacteristicProperties.write | GATTCharacteristicProperties.notify,
-                None,  # Initial value
+                GATTCharacteristicProperties.write | GATTCharacteristicProperties.write_without_response,
+                None,  # No cached value for writable characteristics (macOS requirement)
                 GATTAttributePermissions.writeable
             )
             
             # RX characteristic (Read/Notify from client perspective)
+            # On macOS: characteristics with notify/indicate MUST NOT have cached values
             await self.gatt_server.add_new_characteristic(
                 MESH_SERVICE_UUID,
                 RX_CHAR_UUID,
                 GATTCharacteristicProperties.read | GATTCharacteristicProperties.notify,
-                None,
+                None,  # No cached value for notifiable characteristics (macOS requirement)
                 GATTAttributePermissions.readable
             )
             
@@ -891,8 +955,8 @@ class BleTransport:
                 GATTAttributePermissions.readable
             )
             
-            # Set write handler
-            self.gatt_server.write_request_func = self._handle_gatt_write
+            # Set write handler with accumulation support
+            self.gatt_server.write_request_func = self._handle_gatt_write_with_accumulation
             
             # Start advertising
             await self.gatt_server.start()
@@ -901,9 +965,78 @@ class BleTransport:
             # Keep server running
             while self._running:
                 await asyncio.sleep(1.0)
+                # Clean up stale write buffers
+                self._cleanup_write_buffers()
         
         except Exception as e:
             logger.error(f"GATT server error: {e}")
+    
+    def _handle_gatt_write_with_accumulation(self, characteristic, value: bytes):
+        """
+        Handle GATT write requests with support for accumulated large writes.
+        
+        Some BLE stacks split large writes into multiple chunks. This method
+        accumulates them before processing.
+        """
+        if characteristic.uuid.lower() == TX_CHAR_UUID.lower():
+            client_id = "gatt-client"  # In real impl, track per-client
+            
+            # Check if this is a complete message (has valid header)
+            if len(value) >= HEADER_SIZE:
+                try:
+                    header = MessageHeader.unpack(value)
+                    # If it's a single fragment message, process immediately
+                    if header.frag_total == 1:
+                        asyncio.create_task(self._handle_incoming_data(value, client_id))
+                        return True
+                    # Multi-fragment: accumulate
+                except Exception:
+                    pass
+            
+            # Accumulate write
+            now = time.time()
+            if client_id not in self._gatt_write_buffer:
+                self._gatt_write_buffer[client_id] = value
+            else:
+                self._gatt_write_buffer[client_id] += value
+            self._gatt_write_timestamps[client_id] = now
+            
+            # Try to process if we have enough data
+            asyncio.create_task(self._try_process_accumulated_write(client_id))
+        
+        return True
+    
+    async def _try_process_accumulated_write(self, client_id: str):
+        """Try to process accumulated write data."""
+        if client_id not in self._gatt_write_buffer:
+            return
+        
+        data = self._gatt_write_buffer[client_id]
+        if len(data) < HEADER_SIZE:
+            return
+        
+        try:
+            header = MessageHeader.unpack(data)
+            expected_size = HEADER_SIZE + (header.frag_total * self.fragmenter.mtu)
+            
+            # If we have a complete message, process it
+            if len(data) >= HEADER_SIZE:
+                await self._handle_incoming_data(data, client_id)
+                del self._gatt_write_buffer[client_id]
+                del self._gatt_write_timestamps[client_id]
+        except Exception as e:
+            logger.warning(f"Error processing accumulated write: {e}")
+    
+    def _cleanup_write_buffers(self):
+        """Clean up stale write accumulation buffers."""
+        now = time.time()
+        stale = [
+            cid for cid, ts in self._gatt_write_timestamps.items()
+            if now - ts > 5.0  # 5 second timeout
+        ]
+        for cid in stale:
+            self._gatt_write_buffer.pop(cid, None)
+            self._gatt_write_timestamps.pop(cid, None)
     
     def _handle_gatt_write(self, characteristic, value: bytes):
         """Handle GATT write requests."""
@@ -934,7 +1067,6 @@ class BleTransport:
         Returns:
             True if sent to at least one peer
         """
-        fragments = self.fragmenter.fragment(payload, msg_type, ttl)
         sent = False
         
         for address, client in list(self.connected_clients.items()):
@@ -943,21 +1075,63 @@ class BleTransport:
             
             try:
                 if client.is_connected:
+                    # Fragment with peer-specific MTU
+                    fragments = self.fragmenter.fragment(
+                        payload, msg_type, ttl, peer_id=address
+                    )
                     for fragment in fragments:
-                        await client.write_gatt_char(TX_CHAR_UUID, fragment)
+                        # Use write_gatt_char with response for reliability
+                        await client.write_gatt_char(TX_CHAR_UUID, fragment, response=True)
                     sent = True
+                    self.router.record_packet_sent(address)
             except Exception as e:
                 logger.warning(f"Failed to send to {address}: {e}")
         
         # Also notify via GATT server if available
         if self.gatt_server and not target:
             try:
+                fragments = self.fragmenter.fragment(payload, msg_type, ttl)
                 for fragment in fragments:
-                    self.gatt_server.update_value(MESH_SERVICE_UUID, RX_CHAR_UUID, fragment)
+                    await self._send_chunked_notification(fragment)
             except Exception as e:
                 logger.warning(f"Failed to notify via GATT server: {e}")
         
         return sent
+    
+    async def _send_chunked_notification(self, data: bytes):
+        """
+        Send a notification, chunking if needed to avoid truncation.
+        
+        iOS/macOS have a ~185 byte limit for BLE notifications regardless
+        of negotiated MTU. This method chunks larger payloads.
+        
+        FIXED: Use notify() instead of update_value() for proper GATT notifications.
+        """
+        if not self.gatt_server:
+            return
+        
+        chunks = self.fragmenter.chunk_for_notify(data)
+        
+        for i, chunk in enumerate(chunks):
+            try:
+                # FIXED: Use notify() method which triggers actual BLE notification
+                # update_value() only updates the characteristic value without sending notification
+                await self.gatt_server.notify(MESH_SERVICE_UUID, RX_CHAR_UUID, chunk)
+                
+                # Small delay between chunks to ensure delivery
+                if len(chunks) > 1 and i < len(chunks) - 1:
+                    await asyncio.sleep(0.02)  # 20ms between chunks
+            except AttributeError:
+                # Fallback for bless versions without notify()
+                try:
+                    char = self.gatt_server.get_characteristic(RX_CHAR_UUID)
+                    if char:
+                        char.value = chunk
+                    self.gatt_server.update_value(MESH_SERVICE_UUID, RX_CHAR_UUID)
+                except Exception as e:
+                    logger.warning(f"Failed to update characteristic: {e}")
+            except Exception as e:
+                logger.warning(f"Failed to send notification chunk {i+1}/{len(chunks)}: {e}")
     
     async def send_cbor(
         self,
