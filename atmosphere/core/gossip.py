@@ -23,8 +23,8 @@ logger = logging.getLogger(__name__)
 
 # Gossip message types
 GOSSIP_MSG_ANNOUNCE = "capability_announce"  # Use underscore for cross-platform compat
-GOSSIP_MSG_REQUEST = "capability.request"
-GOSSIP_MSG_RESPONSE = "capability.response"
+GOSSIP_MSG_REQUEST = "capability_request"   # Use underscore for cross-platform compat
+GOSSIP_MSG_RESPONSE = "capability_response"  # Use underscore for cross-platform compat
 
 # Configuration
 GOSSIP_INTERVAL_SEC = 30  # Broadcast capabilities every 30 seconds
