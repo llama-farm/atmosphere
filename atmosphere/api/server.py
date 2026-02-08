@@ -890,8 +890,9 @@ class AtmosphereServer:
                 logger.debug(f"Relay broadcast from {from_node}: {payload_type}")
                 
                 # Handle capability announcements from GossipManager
-                # GossipManager sends: {"type": "broadcast", "payload": {"type": "capability.announce", ...}}
-                if payload_type == "capability.announce" and self.gossip:
+                # GossipManager sends: {"type": "broadcast", "payload": {"type": "capability_announce", ...}}
+                # Support both formats for backwards compatibility
+                if (payload_type == "capability_announce" or payload_type == "capability.announce") and self.gossip:
                     try:
                         await self.gossip.handle_announcement(from_node, payload)
                         logger.info(f"Processed capability announcement from {from_node} via relay")
