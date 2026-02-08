@@ -2971,7 +2971,7 @@ async def get_ble_pairing_state():
     peer_name = ""
     state = "IDLE"
     
-    for peer_id, session in pairing_manager.sessions.items():
+    for peer_id, session in pairing_manager._sessions.items():
         session_info = {
             "peer_id": peer_id,
             "peer_name": session.peer_name,
@@ -3087,7 +3087,7 @@ async def confirm_ble_pairing():
         raise HTTPException(status_code=503, detail="BLE pairing not available")
     
     # Find active pairing session
-    for peer_id, session in pairing_manager.sessions.items():
+    for peer_id, session in pairing_manager._sessions.items():
         if session.state == 3:  # CODE_DISPLAY
             try:
                 success = await pairing_manager.confirm_code(peer_id)
@@ -3112,7 +3112,7 @@ async def reject_ble_pairing():
         raise HTTPException(status_code=503, detail="BLE pairing not available")
     
     # Find and reject active pairing session
-    for peer_id in list(pairing_manager.sessions.keys()):
+    for peer_id in list(pairing_manager._sessions.keys()):
         try:
             await pairing_manager.reject_pairing(peer_id, "user_rejected")
         except Exception as e:

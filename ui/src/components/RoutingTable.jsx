@@ -85,6 +85,7 @@ export function RoutingTable({ wsData }) {
   }, {});
 
   const formatLatency = (ms) => {
+    if (ms == null) return '?';
     if (ms < 10) return `${ms.toFixed(1)}ms`;
     return `${Math.round(ms)}ms`;
   };
@@ -214,7 +215,7 @@ export function RoutingTable({ wsData }) {
                       <span className="metric-label">latency</span>
                     </div>
                     <div className={`metric cost ${getCostClass(bestRoute.cost)}`}>
-                      <span className="metric-value">{bestRoute.cost.toFixed(2)}</span>
+                      <span className="metric-value">{(bestRoute.cost ?? 0).toFixed(2)}</span>
                       <span className="metric-label">cost</span>
                     </div>
                   </div>
@@ -269,7 +270,7 @@ export function RoutingTable({ wsData }) {
                               <span className="metric-value">{formatLatency(route.latency_ms)}</span>
                             </div>
                             <div className={`metric cost ${getCostClass(route.cost)}`}>
-                              <span className="metric-value">{route.cost.toFixed(2)}</span>
+                              <span className="metric-value">{(route.cost ?? 0).toFixed(2)}</span>
                             </div>
                           </div>
                         </div>
