@@ -147,6 +147,46 @@ class LlamaFarmExecutor:
             data = await resp.json()
             return data["choices"][0]["message"]["content"]
     
+    async def stream_chat(self, model: str, messages: List[dict], **kwargs):
+        """
+        Stream chat completion chunks.
+        
+        Yields:
+            dict: Chunk data in OpenAI format:
+                {
+                    "choices": [{"delta": {"content": "chunk"}, "finish_reason": null}],
+                    "model": "model-name"
+                }
+        """
+        session = await self._get_session()
+        payload = {
+            "model": model,
+            "messages": messages,
+            "stream": True,
+            **kwargs
+        }
+        
+        async with session.post(f"{self.base_url}/v1/chat/completions", json=payload) as resp:
+            # Handle Server-Sent Events (SSE) format
+            async for line in resp.content:
+                line_str = line.decode('utf-8').strip()
+                
+                if not line_str or line_str.startswith(':'):
+                    continue  # Skip empty lines and comments
+                
+                if line_str.startswith('data: '):
+                    data_str = line_str[6:]  # Remove 'data: ' prefix
+                    
+                    if data_str == '[DONE]':
+                        break
+                    
+                    try:
+                        import json
+                        chunk = json.loads(data_str)
+                        yield chunk
+                    except json.JSONDecodeError:
+                        continue
+    
     async def generate(self, model: str, prompt: str, **kwargs) -> str:
         """Simple generate (wraps chat)"""
         return await self.chat(model, [{"role": "user", "content": prompt}], **kwargs)

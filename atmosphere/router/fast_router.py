@@ -152,13 +152,41 @@ class KeywordMatcher:
         return set(kw for kw, _ in counts.most_common(max_keywords))
     
     @classmethod
+    def _simple_stem(cls, word: str) -> str:
+        """Very simple stemming: strip common English suffixes."""
+        for suffix in ('ing', 'tion', 'sion', 'ment', 'ness', 'ies', 'ous', 'ive', 'able', 'ible', 'ally', 'ful', 'less', 'ize', 'ise', 'ly', 'er', 'ed', 'es', 's'):
+            if word.endswith(suffix) and len(word) - len(suffix) >= 3:
+                return word[:-len(suffix)]
+        return word
+    
+    @classmethod
     def match_score(cls, query_kw: Set[str], target_kw: Set[str]) -> float:
-        """Jaccard-like keyword match score."""
+        """
+        Query-coverage keyword match score with simple stemming.
+        
+        Measures what fraction of query keywords appear in the target,
+        using both exact and stem-based matching.
+        """
         if not query_kw or not target_kw:
             return 0.0
-        intersection = len(query_kw & target_kw)
-        union = len(query_kw | target_kw)
-        return intersection / union if union > 0 else 0.0
+        
+        # Build stem index for target
+        target_stems = {cls._simple_stem(w) for w in target_kw}
+        target_with_stems = target_kw | target_stems
+        
+        # Count matches (exact + stem)
+        matches = 0
+        for qw in query_kw:
+            if qw in target_kw:
+                matches += 1.0
+            elif cls._simple_stem(qw) in target_stems:
+                matches += 0.85  # Slightly lower confidence for stem match
+        
+        query_coverage = matches / len(query_kw)
+        # Small Jaccard component for tie-breaking
+        exact_intersection = len(query_kw & target_kw)
+        jaccard = exact_intersection / len(query_kw | target_kw) if (query_kw | target_kw) else 0
+        return 0.8 * query_coverage + 0.2 * jaccard
 
 
 class FastEmbedder:
@@ -728,82 +756,91 @@ class FastProjectRouter:
             if score > 0:
                 domain_scores[domain] = score
         
-        # === CASCADE TIER 1: Embedding Match ===
+        # === COMBINED SCORING: Embedding + Keyword ===
+        # Instead of pure cascade, compute all scores and combine them.
+        # This prevents low-confidence hash matches from overriding keyword matches.
+        
+        combined_scores: Dict[str, Dict] = {}
+        
+        # Tier 1: Embedding/Hash similarity
         if self._embedding_matrix is not None and len(self._embedding_matrix) > 0:
             similarities = self._embedding_matrix @ prompt_embedding
-            
-            # Boost scores for keyword-matched domains
-            boosted_scores = similarities.copy()
             for i, path in enumerate(self._project_paths):
                 project = self.projects[path]
+                emb_score = float(similarities[i])
+                # Domain boost
                 if project.domain in domain_scores:
-                    boosted_scores[i] += domain_scores[project.domain] * 0.1
-            
-            best_idx = np.argmax(boosted_scores)
-            best_score = float(boosted_scores[best_idx])
-            
-            if best_score >= EMBEDDING_THRESHOLD:
-                best_project = self.projects[self._project_paths[best_idx]]
-                elapsed = (time.perf_counter() - start) * 1000
-                tier = MatchTier.EMBEDDING if self._embedder.using_neural else MatchTier.HASH
-                reason = f"{'Embedding' if self._embedder.using_neural else 'Hash'} match ({best_project.domain})"
-                return RouteResult(
-                    project=best_project,
-                    score=min(best_score, 1.0),
-                    reason=reason,
-                    latency_ms=elapsed,
-                    fallback=False,
-                    tier=tier,
-                )
+                    emb_score += domain_scores[project.domain] * 0.1
+                combined_scores[path] = {
+                    "embedding": emb_score,
+                    "keyword": 0.0,
+                    "project": project,
+                }
         
-        # === CASCADE TIER 2: Hash Match (if neural embeddings were used in tier 1) ===
+        # Tier 2: Hash match (if neural used in tier 1)
         if self._embedder.using_neural:
-            best_hash_score = 0.0
-            best_hash_project = None
-            
             for path, project in self.projects.items():
                 if project.hash_embedding is not None:
                     score = float(np.dot(prompt_hash_embedding, project.hash_embedding))
-                    # Boost for domain match
                     if project.domain in domain_scores:
                         score += domain_scores[project.domain] * 0.1
-                    if score > best_hash_score:
-                        best_hash_score = score
-                        best_hash_project = project
-            
-            if best_hash_project and best_hash_score >= HASH_THRESHOLD:
-                elapsed = (time.perf_counter() - start) * 1000
-                return RouteResult(
-                    project=best_hash_project,
-                    score=min(best_hash_score, 1.0),
-                    reason=f"Hash fallback ({best_hash_project.domain})",
-                    latency_ms=elapsed,
-                    fallback=False,
-                    tier=MatchTier.HASH,
-                )
+                    if path not in combined_scores:
+                        combined_scores[path] = {"embedding": 0.0, "keyword": 0.0, "project": project}
+                    # Use hash as embedding fallback (take max)
+                    combined_scores[path]["embedding"] = max(combined_scores[path]["embedding"], score)
         
-        # === CASCADE TIER 3: Keyword Match ===
-        best_kw_score = 0.0
-        best_kw_project = None
-        
+        # Tier 3: Keyword match
         for path, project in self.projects.items():
             score = KeywordMatcher.match_score(prompt_keywords, project.keywords)
-            # Boost for domain match
             if project.domain in domain_scores:
                 score += domain_scores[project.domain] * 0.15
-            if score > best_kw_score:
-                best_kw_score = score
-                best_kw_project = project
+            if path not in combined_scores:
+                combined_scores[path] = {"embedding": 0.0, "keyword": 0.0, "project": project}
+            combined_scores[path]["keyword"] = score
         
-        if best_kw_project and best_kw_score >= KEYWORD_THRESHOLD:
+        # Combine: weight keyword matching more heavily since hash embeddings are noisy
+        # High-confidence embedding (>0.5) gets full weight; low-confidence blends with keywords
+        best_combined_score = 0.0
+        best_combined_project = None
+        best_tier = MatchTier.FALLBACK
+        best_reason = ""
+        
+        for path, scores in combined_scores.items():
+            emb = scores["embedding"]
+            kw = scores["keyword"]
+            project = scores["project"]
+            
+            # If embedding is high-confidence, trust it
+            if emb >= 0.5:
+                total = emb
+                tier = MatchTier.EMBEDDING if self._embedder.using_neural else MatchTier.HASH
+                reason = f"{'Embedding' if self._embedder.using_neural else 'Hash'} match ({project.domain})"
+            # Otherwise, blend embedding and keyword scores
+            else:
+                # Keywords get more weight when embedding is uncertain
+                total = 0.4 * emb + 0.6 * kw
+                if kw > emb:
+                    tier = MatchTier.KEYWORD
+                    reason = f"Keyword match ({project.domain})"
+                else:
+                    tier = MatchTier.HASH
+                    reason = f"Hash+keyword blend ({project.domain})"
+            
+            if total > best_combined_score:
+                best_combined_score = total
+                best_combined_project = project
+                best_tier = tier
+                best_reason = reason
+        
+        if best_combined_project and best_combined_score >= KEYWORD_THRESHOLD:
             elapsed = (time.perf_counter() - start) * 1000
             return RouteResult(
-                project=best_kw_project,
-                score=min(best_kw_score, 1.0),
-                reason=f"Keyword fallback ({best_kw_project.domain})",
+                project=best_combined_project,
+                score=min(best_combined_score, 1.0),
+                reason=best_reason,
                 latency_ms=elapsed,
                 fallback=False,
-                tier=MatchTier.KEYWORD,
+                tier=best_tier,
             )
         
         # === TIER 4: Final Fallback ===

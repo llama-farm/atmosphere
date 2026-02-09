@@ -8,8 +8,8 @@ import platform
 import time
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException, Query, WebSocket, WebSocketDisconnect
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, HTTPException, Query, WebSocket, WebSocketDisconnect, File, UploadFile, Form
+from fastapi.responses import JSONResponse, FileResponse
 from pydantic import BaseModel, Field
 
 from .server import get_server, manager
@@ -379,23 +379,37 @@ async def list_capabilities():
     
     caps = []
     
-    # Local capabilities
+    # Local capabilities from gradient table
     for cap in [entry for entry in server.router.gradient_table.all_entries() if entry.hops == 0]:
         caps.append(CapabilityInfo(
             id=cap.capability_id,
             label=cap.capability_label,
-            description="",  # GradientEntry doesn't store description
-            handler="gradient",  # Generic handler
-            models=[],  # GradientEntry doesn't store models
-            keywords=[],  # GradientEntry doesn't store keywords
+            description="",
+            handler="gradient",
+            models=[],
+            keywords=[],
             source="local"
         ))
+    
+    # If gradient table is empty, try from local_capability_ids
+    if not caps and hasattr(server.router, 'local_capability_ids'):
+        for cap_id in server.router.local_capability_ids:
+            label = cap_id.split(':')[-1] if ':' in cap_id else cap_id
+            caps.append(CapabilityInfo(
+                id=cap_id,
+                label=label,
+                description="",
+                handler="local",
+                models=[],
+                keywords=[],
+                source="local"
+            ))
     
     # LlamaFarm capabilities (discovered dynamically)
     try:
         from ..integration.llamafarm import discover_llamafarm_capabilities
         
-        node_id = server.node.identity.id if server.node else "local"
+        node_id = server.node.identity.node_id if server.node else "local"
         node_name = server.node.identity.name if server.node else "local-node"
         
         llamafarm_caps = await discover_llamafarm_capabilities(
@@ -440,7 +454,7 @@ async def list_mesh_capabilities():
     try:
         from ..integration.llamafarm import discover_llamafarm_capabilities
         
-        node_id = server.node.identity.id if server.node else "local"
+        node_id = server.node.identity.node_id if server.node else "local"
         node_name = server.node.identity.name if server.node else "local-node"
         
         local_caps = await discover_llamafarm_capabilities(
@@ -487,10 +501,11 @@ async def mesh_status():
     
     mesh = server.node.mesh if server.node else None
     
-    # Count peers from both local discovery and relay
+    # Count peers from local discovery, relay, AND LAN WebSocket
     local_peers = len(server.discovery.peers) if server.discovery else 0
     relay_peers = len(getattr(server, '_relay_peers', {}))
-    total_peers = local_peers + relay_peers
+    lan_peers = len(getattr(server, '_lan_peers', {}))
+    total_peers = local_peers + relay_peers + lan_peers
     
     # Node count: self + peers
     node_count = 1 + total_peers
@@ -536,6 +551,15 @@ async def gossip_broadcast():
         raise HTTPException(status_code=503, detail="No gossip manager")
     
     await server.gossip.broadcast_capabilities()
+    
+    # Also broadcast to UI WebSocket clients
+    await manager.broadcast({
+        "type": "gossip_broadcast",
+        "event": "manual_broadcast",
+        "capabilities_count": len(server.gossip._local_capabilities),
+        "timestamp": time.time()
+    })
+    
     return {
         "broadcast": True,
         "capabilities_sent": len(server.gossip._local_capabilities),
@@ -622,12 +646,26 @@ async def list_peers():
                 "is_founder": peer_info.get("is_founder", False)
             })
     
+    # Add LAN WebSocket-connected peers
+    lan_peers = getattr(server, '_lan_peers', {})
+    for node_id, ws in lan_peers.items():
+        if not any(p.get("node_id") == node_id for p in peers):
+            peers.append({
+                "node_id": node_id,
+                "name": node_id[:8],
+                "address": "LAN",
+                "mesh_id": server.node.mesh.mesh_id if server.node and server.node.mesh else None,
+                "capabilities": [],
+                "via": "lan_ws"
+            })
+    
     return {
         "peers": peers,
         "count": len(peers),
         "sources": {
             "mdns": len(server.discovery.peers) if server.discovery else 0,
-            "relay": len(relay_peers)
+            "relay": len(relay_peers),
+            "lan": len(lan_peers)
         }
     }
 
@@ -1824,6 +1862,18 @@ async def websocket_endpoint(websocket: WebSocket):
                             logger.debug(f"Failed to send cost update: {e}")
                             break
                     
+                    # Send gossip heartbeat every 30 seconds
+                    if server and server.gossip and server.gossip._local_capabilities:
+                        gossip_message = {
+                            "type": "gossip_broadcast",
+                            "event": "heartbeat",
+                            "capabilities_count": len(server.gossip._local_capabilities),
+                            "local_cap_ids": list(server.gossip._local_capabilities.keys())[:5],
+                            "gossip_running": server.gossip._running,
+                            "timestamp": now
+                        }
+                        await websocket.send_json(gossip_message)
+                    
                     # Send ping to keep connection alive
                     await websocket.send_json({"type": "ping", "timestamp": now})
                     
@@ -2854,10 +2904,12 @@ async def get_transports():
         }
     }
     
-    # LAN transport status
+    # LAN transport status (mDNS + WebSocket peers)
+    mdns_count = len(server.discovery.peers) if server.discovery else 0
+    lan_ws_count = len(getattr(server, '_lan_peers', {}))
     transports["status"]["lan"] = {
-        "state": "active" if server.discovery else "disabled",
-        "peer_count": len(server.discovery.peers) if server.discovery else 0,
+        "state": "active" if (server.discovery or lan_ws_count > 0) else "disabled",
+        "peer_count": mdns_count + lan_ws_count,
     }
     transports["peers_by_transport"]["lan"] = [
         {"node_id": p.node_id, "name": p.name, "address": p.address}
@@ -3119,3 +3171,200 @@ async def reject_ble_pairing():
             logger.warning(f"Error rejecting pairing: {e}")
     
     return {"success": True}
+
+
+# ============ Vision Endpoints ============
+
+@router.post("/vision/detect")
+async def vision_detect(
+    file: UploadFile = File(None),
+    image_base64: str = Form(None),
+    model_id: str = Form("general_coco"),
+    confidence_threshold: float = Form(0.25)
+):
+    """
+    Detect objects in an image using YOLO via Universal Runtime.
+    
+    Accepts either:
+    - Multipart form file upload
+    - Base64-encoded image in form data
+    
+    Returns detected objects with bounding boxes and confidence scores.
+    """
+    try:
+        # Get image bytes
+        if file:
+            image_bytes = await file.read()
+        elif image_base64:
+            import base64
+            image_bytes = base64.b64decode(image_base64)
+        else:
+            raise HTTPException(status_code=400, detail="No image provided")
+        
+        # Call Universal Runtime vision endpoint (expects JSON with base64 image)
+        import aiohttp, base64
+        image_b64 = base64.b64encode(image_bytes).decode('utf-8')
+        async with aiohttp.ClientSession() as session:
+            # Map model_id to actual model path/name
+            MODEL_MAP = {
+                "military_aircraft": "/Users/robthelen/ZuZu/runs/detect/train5/weights/best.pt",
+                "general_coco": "yolov8n",
+            }
+            model_name = MODEL_MAP.get(model_id, model_id)
+            
+            payload = {
+                "image": f"data:image/jpeg;base64,{image_b64}",
+                "model": model_name,
+                "confidence_threshold": confidence_threshold
+            }
+            
+            async with session.post(
+                'http://localhost:11540/v1/vision/detect',
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=30)
+            ) as response:
+                if response.status == 200:
+                    result = await response.json()
+                    return JSONResponse(content=result)
+                else:
+                    error_text = await response.text()
+                    logger.error(f"Universal Runtime vision detect failed: {error_text}")
+                    raise HTTPException(
+                        status_code=response.status,
+                        detail=f"Vision detection failed: {error_text}"
+                    )
+    
+    except Exception as e:
+        logger.error(f"Vision detect error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/vision/classify")
+async def vision_classify(
+    file: UploadFile = File(None),
+    image_base64: str = Form(None),
+    top_k: int = Form(5)
+):
+    """
+    Classify an image using CLIP via Universal Runtime.
+    
+    Returns top-k class probabilities.
+    """
+    try:
+        # Get image bytes
+        if file:
+            image_bytes = await file.read()
+        elif image_base64:
+            import base64
+            image_bytes = base64.b64decode(image_base64)
+        else:
+            raise HTTPException(status_code=400, detail="No image provided")
+        
+        # Call Universal Runtime vision endpoint
+        import aiohttp
+        async with aiohttp.ClientSession() as session:
+            form_data = aiohttp.FormData()
+            form_data.add_field('file', image_bytes, filename='image.jpg', content_type='image/jpeg')
+            form_data.add_field('top_k', str(top_k))
+            
+            async with session.post(
+                'http://localhost:11540/v1/vision/classify',
+                data=form_data,
+                timeout=aiohttp.ClientTimeout(total=30)
+            ) as response:
+                if response.status == 200:
+                    result = await response.json()
+                    return JSONResponse(content=result)
+                else:
+                    error_text = await response.text()
+                    logger.error(f"Universal Runtime vision classify failed: {error_text}")
+                    raise HTTPException(
+                        status_code=response.status,
+                        detail=f"Vision classification failed: {error_text}"
+                    )
+    
+    except Exception as e:
+        logger.error(f"Vision classify error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/vision/models")
+async def list_vision_models():
+    """
+    List available vision models (from local storage).
+    
+    Returns metadata for each model including:
+    - model_id
+    - version
+    - classes
+    - input_size
+    - file_size
+    - accuracy
+    """
+    import os
+    import json
+    from pathlib import Path
+    
+    try:
+        # Look in the exported models directory
+        models_dir = Path("/Users/robthelen/clawd/data/vision_models")
+        models = []
+        
+        if models_dir.exists():
+            for model_dir in models_dir.iterdir():
+                if model_dir.is_dir():
+                    metadata_file = model_dir / "metadata.json"
+                    if metadata_file.exists():
+                        with open(metadata_file) as f:
+                            metadata = json.load(f)
+                            
+                            # Add file info
+                            model_files = list(model_dir.glob("*.onnx"))
+                            if model_files:
+                                metadata["file_path"] = str(model_files[0])
+                                metadata["file_size_mb"] = round(model_files[0].stat().st_size / (1024*1024), 2)
+                            
+                            models.append(metadata)
+        
+        return {"models": models, "count": len(models)}
+    
+    except Exception as e:
+        logger.error(f"List vision models error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/vision/models/{model_id}/download")
+async def download_vision_model(model_id: str):
+    """
+    Download a vision model file for mesh delivery.
+    
+    Returns the ONNX model file.
+    """
+    from fastapi.responses import FileResponse
+    from pathlib import Path
+    
+    try:
+        models_dir = Path("/Users/robthelen/clawd/data/vision_models")
+        
+        # Find model directory
+        for model_dir in models_dir.iterdir():
+            if model_dir.is_dir() and model_id in model_dir.name:
+                # Look for ONNX file
+                model_files = list(model_dir.glob("*.onnx"))
+                if model_files:
+                    return FileResponse(
+                        path=str(model_files[0]),
+                        media_type="application/octet-stream",
+                        filename=model_files[0].name
+                    )
+        
+        raise HTTPException(status_code=404, detail=f"Model {model_id} not found")
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Download model error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# Add imports at the top of the file if not already present

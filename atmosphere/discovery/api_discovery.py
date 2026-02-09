@@ -178,12 +178,13 @@ class APIDiscovery:
             if models_config and isinstance(models_config[0], dict):
                 provider = models_config[0].get("provider", "universal")
             
-            # Detect domain from prompts
+            # Detect domain from prompts and model descriptions
             domain = "general"
             capabilities = ["chat"]
             topics = []
             description = ""
             
+            # First try system prompt
             prompts = config.get("prompts", [])
             if prompts and isinstance(prompts[0], dict):
                 messages = prompts[0].get("messages", [])
@@ -193,6 +194,27 @@ class APIDiscovery:
                         domain, topics = self._extract_domain_and_topics(content)
                         description = self._extract_description(msg.get("content", ""))
                         break
+            
+            # If no description from prompts, use model description (critical for routing!)
+            if not description and models_config:
+                for m in models_config:
+                    if isinstance(m, dict) and m.get("description"):
+                        model_desc = m["description"]
+                        description = model_desc
+                        # Also extract domain and topics from model description
+                        if domain == "general":
+                            domain, model_topics = self._extract_domain_and_topics(model_desc.lower())
+                            if model_topics:
+                                topics.extend(model_topics)
+                        # Extract rich keywords from description for topics
+                        if not topics:
+                            topics = self._extract_keywords_from_description(model_desc)
+                        break
+            
+            # Also extract from project name as fallback
+            if not topics:
+                name_words = name.replace("-", " ").replace("_", " ").split()
+                topics = [w.lower() for w in name_words if len(w) > 2]
             
             # Detect capabilities
             if config.get("rag", {}).get("databases"):
@@ -219,19 +241,25 @@ class APIDiscovery:
             return None
     
     def _extract_domain_and_topics(self, content: str) -> tuple:
-        """Extract domain and topics from system prompt."""
+        """Extract domain and topics from system prompt or description."""
         domain = "general"
         topics = []
         
-        # Domain detection
+        # Domain detection - expanded to cover all discoverable projects
         domain_keywords = {
             "camelids": ["llama", "alpaca", "camelid", "fiber"],
             "fishing": ["fishing", "fish", "bass", "regulations"],
-            "healthcare": ["medical", "health", "patient", "clinical"],
-            "legal": ["legal", "law", "attorney", "court"],
-            "finance": ["finance", "money", "investment", "trading"],
-            "coding": ["code", "programming", "developer", "software"],
-            "infrastructure": ["sre", "ops", "infrastructure", "deploy"],
+            "healthcare": ["medical", "health", "patient", "clinical", "wellness", "fitness", "exercise", "nutrition", "workout"],
+            "legal": ["legal", "law", "attorney", "court", "contract", "compliance", "regulation", "intellectual property", "gdpr"],
+            "finance": ["finance", "money", "investment", "trading", "business", "strategy", "market", "startup", "revenue", "venture"],
+            "coding": ["code", "programming", "developer", "software", "python", "javascript", "debugging", "algorithm", "api", "devops"],
+            "infrastructure": ["sre", "ops", "infrastructure", "deploy", "docker", "kubernetes"],
+            "creative": ["writing", "poetry", "fiction", "screenwriting", "creative", "story", "narrative", "literary"],
+            "education_math": ["math", "algebra", "calculus", "statistics", "geometry", "equation", "trigonometry"],
+            "education_science": ["physics", "chemistry", "biology", "astronomy", "ecology", "genetics", "quantum", "thermodynamics"],
+            "history": ["history", "civilization", "medieval", "war", "revolution", "archaeology", "ancient", "political movement"],
+            "culinary": ["cooking", "recipe", "culinary", "cuisine", "baking", "grilling", "meal", "ingredient", "kitchen", "chef"],
+            "travel": ["travel", "destination", "itinerary", "tourism", "hotel", "flight", "vacation", "visa", "adventure"],
         }
         
         for domain_name, keywords in domain_keywords.items():
@@ -244,6 +272,28 @@ class APIDiscovery:
                 break
         
         return domain, list(set(topics))
+    
+    def _extract_keywords_from_description(self, description: str) -> List[str]:
+        """Extract meaningful keywords from a model description for routing."""
+        import re
+        stopwords = {
+            'the', 'a', 'an', 'is', 'are', 'and', 'or', 'for', 'to', 'of',
+            'in', 'on', 'with', 'that', 'this', 'from', 'by', 'as', 'at',
+            'be', 'has', 'had', 'have', 'was', 'were', 'will', 'can', 'may',
+            'its', 'all', 'but', 'not', 'use', 'using', 'used', 'about',
+            'expert', 'specializing', 'assistant', 'model', 'general', 'purpose',
+            'best', 'such', 'than', 'also', 'into', 'over', 'default',
+        }
+        words = re.findall(r'\b[a-zA-Z]{3,}\b', description.lower())
+        keywords = [w for w in words if w not in stopwords]
+        # Return unique keywords preserving order
+        seen = set()
+        result = []
+        for w in keywords:
+            if w not in seen:
+                seen.add(w)
+                result.append(w)
+        return result[:20]
     
     def _extract_description(self, content: str) -> str:
         """Extract first sentence as description."""

@@ -48,6 +48,13 @@ enum MeshMessageType: UInt8 {
     case dataAck = 0x21
     case meshInfo = 0x30
     case capability = 0x31
+    
+    // Vision escalation types
+    case escalationRequest = 0x40
+    case escalationResponse = 0x41
+    case modelCatalog = 0x42
+    case modelRequest = 0x43
+    case modelTransfer = 0x44
 }
 
 struct MeshMessage: Identifiable {
@@ -540,12 +547,14 @@ extension BLEMeshManager: CBPeripheralManagerDelegate {
     }
     
     nonisolated func peripheralManager(_ peripheral: CBPeripheralManager, didReceiveRead request: CBATTRequest) {
-        if request.characteristic.uuid == MeshUUIDs.infoChar {
-            request.value = buildNodeInfo()
-        } else if request.characteristic.uuid == MeshUUIDs.meshIdChar {
-            request.value = nodeId.data(using: .utf8)
+        Task { @MainActor in
+            if request.characteristic.uuid == MeshUUIDs.infoChar {
+                request.value = buildNodeInfo()
+            } else if request.characteristic.uuid == MeshUUIDs.meshIdChar {
+                request.value = nodeId.data(using: .utf8)
+            }
+            peripheral.respond(to: request, withResult: .success)
         }
-        peripheral.respond(to: request, withResult: .success)
     }
     
     private func handleIncomingServerMessage(_ data: Data) {

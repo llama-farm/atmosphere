@@ -13,6 +13,7 @@ import { ApprovalPanel } from './components/ApprovalPanel';
 import { TestingPanel } from './components/TestingPanel';
 import { ProjectsPanel } from './components/ProjectsPanel';
 import { BlePairingPanel } from './components/BlePairingPanel';
+import VisionPanel from './components/VisionPanel';
 import { 
   LayoutDashboard, 
   Network, 
@@ -28,7 +29,8 @@ import {
   Shield,
   FlaskConical,
   Folder,
-  Bluetooth
+  Bluetooth,
+  Eye
 } from 'lucide-react';
 import './App.css';
 
@@ -37,6 +39,7 @@ const pages = [
   { id: 'topology', label: 'Mesh Topology', icon: Network, component: MeshTopology },
   { id: 'flow', label: 'Capability Flow', icon: ArrowUpDown, component: BidirectionalFlow },
   { id: 'capabilities', label: 'Capabilities', icon: Layers, component: Capabilities },
+  { id: 'vision', label: 'Vision', icon: Eye, component: VisionPanel },
   { id: 'router', label: 'Intent Router', icon: Zap, component: IntentRouter },
   { id: 'agents', label: 'Agent Inspector', icon: Activity, component: AgentInspector },
   { id: 'integrations', label: 'Integrations', icon: Puzzle, component: IntegrationPanel },

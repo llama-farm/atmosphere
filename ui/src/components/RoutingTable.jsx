@@ -44,11 +44,51 @@ export function RoutingTable({ wsData }) {
 
   const fetchRoutes = useCallback(async () => {
     try {
+      // Try /api/routing first for real routes
       const response = await fetch(`${API_BASE}/api/routing`);
       if (!response.ok) throw new Error('Failed to fetch routing table');
       const data = await response.json();
-      setRoutes(data.routes || []);
-      setStats(data.stats);
+      
+      let rawRoutes = data.routes || [];
+      
+      // Map gradient table entries to display format
+      let routeList = rawRoutes.map(r => ({
+        destination: r.destination || r.capability_label || r.capability_id?.split(':').slice(1).join(':') || 'unknown',
+        next_hop: r.next_hop || r.via_node || data.node_id || 'local',
+        transport: r.transport || (r.hops === 0 ? 'lan' : 'relay'),
+        hop_count: r.hop_count ?? r.hops ?? 0,
+        latency_ms: r.latency_ms ?? r.estimated_latency_ms ?? null,
+        cost: r.cost ?? r.confidence ?? 0,
+        reliability: r.reliability ?? r.confidence ?? 1.0,
+        last_updated: r.last_updated || data.timestamp || Date.now() / 1000,
+      }));
+      
+      // If still empty, synthesize from gradient table capabilities
+      if (routeList.length === 0 && data.gradient_table?.capabilities?.length > 0) {
+        const nodeId = data.node_id || 'local';
+        routeList = data.gradient_table.capabilities.map((capId) => {
+          const parts = capId.split(':');
+          const capName = parts.length > 1 ? parts.slice(1).join(':') : capId;
+          return {
+            destination: capName,
+            next_hop: nodeId,
+            transport: 'lan',
+            hop_count: 0,
+            latency_ms: 5,
+            cost: 0.1,
+            reliability: 1.0,
+            last_updated: data.timestamp || Date.now() / 1000,
+          };
+        });
+      }
+      
+      setRoutes(routeList);
+      setStats(data.stats?.count > 0 ? data.stats : {
+        total_routes: routeList.length,
+        active_routes: routeList.length,
+        unique_destinations: new Set(routeList.map(r => r.destination)).size,
+        route_lookups: 0,
+      });
       setError(null);
     } catch (err) {
       setError(err.message);
@@ -193,7 +233,7 @@ export function RoutingTable({ wsData }) {
 
                   <div className="route-path">
                     <div className="destination">
-                      {dest.substring(0, 12)}...
+                      {dest.length > 30 ? dest.split('/').pop() : dest.substring(0, 20)}{dest.length > 20 ? '...' : ''}
                       {hasAlternatives && (
                         <span className="alt-count">+{destRoutes.length - 1}</span>
                       )}

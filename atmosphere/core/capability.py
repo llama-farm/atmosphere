@@ -480,8 +480,26 @@ class CapabilityAnnouncement:
                 if len(word) > 2 and word.lower() not in generated_keywords:
                     generated_keywords.append(word.lower())
             
-            # Add general capability keywords
-            generated_keywords.extend(["llm", "chat", "ai", "assistant"])
+            # Extract domain-specific keywords from model description
+            # This is critical for routing differentiation
+            if effective_description:
+                desc_stopwords = {
+                    'the', 'a', 'an', 'is', 'are', 'and', 'or', 'for', 'to',
+                    'of', 'in', 'on', 'with', 'that', 'this', 'from', 'by',
+                    'as', 'at', 'be', 'has', 'had', 'have', 'was', 'were',
+                    'will', 'can', 'may', 'its', 'all', 'but', 'not', 'use',
+                    'using', 'used', 'about', 'such', 'than', 'also', 'into',
+                    'over', 'after', 'before', 'between', 'through', 'during',
+                    'expert', 'specializing', 'assistant', 'model', 'general',
+                    'purpose', 'best',
+                }
+                desc_words = re.findall(r'\b[a-zA-Z]{3,}\b', effective_description.lower())
+                for w in desc_words:
+                    if w not in desc_stopwords and w not in generated_keywords:
+                        generated_keywords.append(w)
+            
+            # Add general capability keywords (at the end, lower priority)
+            generated_keywords.extend(["llm", "chat", "ai"])
             if has_rag:
                 generated_keywords.extend(["rag", "retrieval", "knowledge"])
             

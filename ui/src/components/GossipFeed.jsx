@@ -9,30 +9,84 @@ const MESSAGE_TYPES = {
   TRIGGER_EVENT: { color: '#f97316', label: 'Trigger', icon: ArrowUp, animated: true },
   TOOL_CALL: { color: '#3b82f6', label: 'Tool Call', icon: ArrowDown },
   capability: { color: '#8b5cf6', label: 'Capability', icon: Zap },
+  capability_added: { color: '#8b5cf6', label: 'Capability', icon: Zap },
   node: { color: '#10b981', label: 'Node', icon: CheckCircle2 },
   error: { color: '#ef4444', label: 'Error', icon: XCircle },
+  routing_decision: { color: '#f59e0b', label: 'Routing', icon: ArrowUp, animated: true },
+  execution: { color: '#3b82f6', label: 'Execution', icon: Zap },
+  connected: { color: '#10b981', label: 'Connected', icon: Wifi },
+  peer_joined: { color: '#10b981', label: 'Peer Joined', icon: CheckCircle2 },
+  peer_left: { color: '#ef4444', label: 'Peer Left', icon: XCircle },
+  route_changed: { color: '#f59e0b', label: 'Route Changed', icon: ArrowUp },
+  gossip_broadcast: { color: '#8b5cf6', label: 'Gossip', icon: Radio },
+};
+
+const formatWsMessage = (data) => {
+  if (data.type === 'routing_decision') return `Routed "${data.intent}" → ${data.capability} (score: ${(data.score || 0).toFixed(2)})`;
+  if (data.type === 'execution') return `Executed: ${data.capability} (${data.execution_time_ms?.toFixed(0)}ms)`;
+  if (data.type === 'connected') return `WebSocket connected to node ${data.node_id?.substring(0, 8)}`;
+  if (data.type === 'peer_joined') return `Peer joined: ${data.peer?.name || data.peer?.node_id?.substring(0, 8)}`;
+  if (data.type === 'peer_left') return `Peer left: ${data.node_id?.substring(0, 8)}`;
+  if (data.type === 'capability_added') return `New capability: ${data.capability?.id || data.capability?.label}`;
+  if (data.type === 'route_changed') return `Route updated`;
+  if (data.type === 'gossip_broadcast') return `Gossip broadcast: ${data.capabilities_count} capabilities`;
+  if (data.type === 'pong') return null; // Skip pongs
+  return JSON.stringify(data).substring(0, 120);
 };
 
 export const GossipFeed = ({ wsData, demoMode = false }) => {
   const [messages, setMessages] = useState([]);
   const [filter, setFilter] = useState('all'); // all, capabilities, nodes, triggers, tools, errors
 
+  // Fetch gossip status on mount and periodically
   useEffect(() => {
-    // Add WebSocket messages to feed
-    if (wsData && wsData.type === 'gossip') {
+    const fetchGossipStatus = async () => {
+      try {
+        const res = await fetch('/api/gossip/status');
+        const data = await res.json();
+        if (data.local_cap_ids && data.local_cap_ids.length > 0) {
+          const capMessages = data.local_cap_ids.map((capId, i) => ({
+            id: Date.now() + i,
+            type: 'CAPABILITY_AVAILABLE',
+            node: 'local',
+            capability: capId.split(':').pop(),
+            message: `Local capability: ${capId.split(':').pop()}`,
+            timestamp: new Date(Date.now() - i * 1000),
+            success: true,
+          }));
+          setMessages(prev => {
+            if (prev.length === 0) return capMessages;
+            return prev;
+          });
+        }
+      } catch (err) {
+        console.error('Failed to fetch gossip status:', err);
+      }
+    };
+    fetchGossipStatus();
+    const interval = setInterval(fetchGossipStatus, 30000);
+    return () => clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
+    // Add ALL WebSocket messages to feed (not just type === 'gossip')
+    if (wsData) {
+      const msgType = wsData.event_type || wsData.type || 'capability';
       const newMessage = {
         id: Date.now(),
-        type: wsData.event_type || 'capability',
-        node: wsData.node || 'unknown',
+        type: msgType,
+        node: wsData.node_id || wsData.node || 'local',
         capability: wsData.capability,
         trigger: wsData.trigger,
         tool: wsData.tool,
-        message: wsData.message || JSON.stringify(wsData),
+        message: wsData.message || wsData.intent || formatWsMessage(wsData),
         timestamp: new Date(),
         success: wsData.success !== false,
       };
       
-      setMessages(prev => [newMessage, ...prev.slice(0, 49)]); // Keep last 50
+      if (newMessage.message !== null) {
+        setMessages(prev => [newMessage, ...prev.slice(0, 49)]); // Keep last 50
+      }
     }
   }, [wsData]);
 
@@ -61,10 +115,10 @@ export const GossipFeed = ({ wsData, demoMode = false }) => {
 
   const filteredMessages = messages.filter(msg => {
     if (filter === 'all') return true;
-    if (filter === 'capabilities') return msg.type === 'capability' || msg.type === 'CAPABILITY_AVAILABLE' || msg.type === 'CAPABILITY_HEARTBEAT';
-    if (filter === 'nodes') return msg.type === 'node';
-    if (filter === 'triggers') return msg.type === 'TRIGGER_EVENT';
-    if (filter === 'tools') return msg.type === 'TOOL_CALL';
+    if (filter === 'capabilities') return msg.type === 'capability' || msg.type === 'CAPABILITY_AVAILABLE' || msg.type === 'CAPABILITY_HEARTBEAT' || msg.type === 'capability_added' || msg.type === 'gossip_broadcast';
+    if (filter === 'nodes') return msg.type === 'node' || msg.type === 'peer_joined' || msg.type === 'peer_left' || msg.type === 'connected';
+    if (filter === 'triggers') return msg.type === 'TRIGGER_EVENT' || msg.type === 'routing_decision';
+    if (filter === 'tools') return msg.type === 'TOOL_CALL' || msg.type === 'execution';
     if (filter === 'errors') return !msg.success;
     return true;
   });
@@ -167,7 +221,7 @@ export const GossipFeed = ({ wsData, demoMode = false }) => {
           <span className="stat-label">Total Messages</span>
         </div>
         <div className="stat">
-          <span className="stat-value">{messages.filter(m => m.type === 'capability').length}</span>
+          <span className="stat-value">{messages.filter(m => m.type === 'capability' || m.type === 'CAPABILITY_AVAILABLE' || m.type === 'gossip_broadcast' || m.type === 'capability_added').length}</span>
           <span className="stat-label">Capabilities</span>
         </div>
         <div className="stat">

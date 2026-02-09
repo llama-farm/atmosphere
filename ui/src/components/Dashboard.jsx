@@ -66,16 +66,21 @@ export const Dashboard = ({ wsData }) => {
       })
       .catch(err => {
         console.error('Failed to fetch capabilities:', err);
-        // Set demo capability stats
-        setCapabilityStats({
-          total: 5,
-          byType: {
-            'llm': 3,
-            'tool': 2,
-          },
-          recentTriggers: [],
-          activeToolCalls: [],
-        });
+        // Fallback: try gossip status for capability count
+        fetch('/api/gossip/status')
+          .then(res => res.json())
+          .then(data => {
+            if (data.local_cap_ids) {
+              const byType = {};
+              data.local_cap_ids.forEach(capId => {
+                const type = capId.includes('llamafarm') ? 'llm' : 'tool';
+                byType[type] = (byType[type] || 0) + 1;
+              });
+              setCapabilityStats(prev => ({ ...prev, total: data.local_capabilities || 0, byType }));
+              setStats(prev => ({ ...prev, totalCapabilities: data.local_capabilities || 0, activeAgents: data.local_capabilities || 0 }));
+            }
+          })
+          .catch(() => {});
       });
   }, []);
 
