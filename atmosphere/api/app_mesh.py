@@ -123,6 +123,7 @@ class AppMeshManager:
                     "description": capability_data.get("description", ""),
                     "keywords": capability_data.get("keywords", []),
                     "endpoints": capability_data.get("endpoints", {}),
+                    "tools": capability_data.get("tools", {}),  # Tool definitions from OpenAPI
                 }
             )
             
@@ -150,6 +151,133 @@ class AppMeshManager:
                 "error": str(e)
             })
     
+    async def handle_tool_call(
+        self,
+        message: Dict[str, Any],
+        source_websocket: Any = None
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Handle a tool_call message: resolve tool → endpoint → HTTP request.
+        
+        Message format:
+        {
+            "type": "tool_call",
+            "app": "horizon",
+            "tool": "scan_anomalies",
+            "params": {...},
+            "request_id": "uuid"  # optional
+        }
+        
+        Returns response dict or sends via websocket.
+        """
+        try:
+            request_id = message.get("request_id") or str(uuid.uuid4())
+            app_name = message.get("app")
+            tool_name = message.get("tool")
+            params = message.get("params", {})
+
+            if not app_name or not tool_name:
+                error = {"type": "tool_response", "request_id": request_id, "status": 400, "body": {"error": "Missing 'app' or 'tool'"}}
+                if source_websocket:
+                    await source_websocket.send_json(error)
+                return error
+
+            # Find the tool across all capabilities for this app
+            base_url = self._app_base_urls.get(app_name)
+            tool_endpoint = None
+
+            for cap_id, cap in self.registry._capabilities.items():
+                if cap.metadata.get("app_name") != app_name:
+                    continue
+                endpoints = cap.metadata.get("endpoints", {})
+                tools = cap.metadata.get("tools", {})
+                # Check tools first
+                if tool_name in tools:
+                    t = tools[tool_name]
+                    ep = t.get("endpoint", {}) if isinstance(t, dict) else {}
+                    tool_endpoint = ep
+                    break
+                # Fall back to endpoints
+                if tool_name in endpoints:
+                    tool_endpoint = endpoints[tool_name]
+                    break
+
+            if not tool_endpoint or not base_url:
+                error = {"type": "tool_response", "request_id": request_id, "status": 404, "body": {"error": f"Tool '{tool_name}' not found for app '{app_name}'"}}
+                if source_websocket:
+                    await source_websocket.send_json(error)
+                return error
+
+            # Build HTTP request
+            method = tool_endpoint.get("method", "GET").upper()
+            path = tool_endpoint.get("path", f"/{tool_name}")
+            url = f"{base_url.rstrip('/')}{path}"
+
+            # Substitute path params
+            import re
+            for key in re.findall(r'\{(\w+)\}', path):
+                if key in params:
+                    url = url.replace(f"{{{key}}}", str(params.pop(key)))
+
+            try:
+                if method == "GET":
+                    response = await self._http_client.get(url, params=params)
+                elif method in ("POST", "PUT", "PATCH"):
+                    response = await self._http_client.request(method, url, json=params if params else None)
+                elif method == "DELETE":
+                    response = await self._http_client.delete(url, params=params)
+                else:
+                    response = await self._http_client.request(method, url)
+
+                try:
+                    body = response.json()
+                except Exception:
+                    body = {"text": response.text}
+
+                result = {"type": "tool_response", "request_id": request_id, "status": response.status_code, "body": body, "tool": tool_name}
+                logger.info(f"✓ Tool call {app_name}/{tool_name} → {response.status_code}")
+
+            except httpx.ConnectError:
+                result = {"type": "tool_response", "request_id": request_id, "status": 503, "body": {"error": f"App unreachable: {app_name}"}}
+            except httpx.TimeoutException:
+                result = {"type": "tool_response", "request_id": request_id, "status": 504, "body": {"error": f"App timeout: {app_name}"}}
+
+            if source_websocket:
+                await source_websocket.send_json(result)
+            return result
+
+        except Exception as e:
+            logger.error(f"Error handling tool_call: {e}", exc_info=True)
+            error = {"type": "tool_response", "request_id": message.get("request_id", ""), "status": 500, "body": {"error": str(e)}}
+            if source_websocket:
+                await source_websocket.send_json(error)
+            return error
+
+    def get_tools_for_app(self, app_name: str) -> Dict[str, Any]:
+        """
+        Get all tools for a given app, across all its capabilities.
+        Used by GET /apps/{app_name}/tools endpoint.
+        """
+        tools = {}
+        for cap_id, cap in self.registry._capabilities.items():
+            if cap.metadata.get("app_name") != app_name:
+                continue
+            # Prefer tools from metadata
+            cap_tools = cap.metadata.get("tools", {})
+            if cap_tools:
+                tools.update(cap_tools)
+            else:
+                # Fall back to endpoints as pseudo-tools
+                for ep_name, ep_spec in cap.metadata.get("endpoints", {}).items():
+                    tools[ep_name] = {
+                        "name": ep_name,
+                        "description": ep_spec.get("description", ""),
+                        "parameters": [],
+                        "returns": "Response",
+                        "endpoint": ep_spec,
+                    }
+        return tools
+
     async def handle_app_request(
         self,
         message: Dict[str, Any],

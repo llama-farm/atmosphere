@@ -4,7 +4,7 @@ import logging
 from typing import Dict, List, Any, Optional
 import httpx
 
-from .capability import Capability, CapabilityType
+from .capability import Capability, CapabilityType, EndpointSpec, ToolSpec, ToolParam
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +35,149 @@ class OpenAPIParser:
             self.spec = response.json()
             return self.spec
     
+    def _resolve_ref(self, ref: str) -> Dict[str, Any]:
+        """Resolve a $ref pointer in the OpenAPI spec."""
+        if not ref.startswith("#/"):
+            return {}
+        parts = ref[2:].split("/")
+        obj = self.spec
+        for p in parts:
+            if isinstance(obj, dict):
+                obj = obj.get(p, {})
+            else:
+                return {}
+        return obj if isinstance(obj, dict) else {}
+
+    def _resolve_schema(self, schema: Dict[str, Any]) -> Dict[str, Any]:
+        """Resolve a schema, following $ref if present."""
+        if "$ref" in schema:
+            return self._resolve_ref(schema["$ref"])
+        return schema
+
+    def _schema_to_type(self, schema: Dict[str, Any]) -> str:
+        """Convert JSON Schema type to tool param type."""
+        schema = self._resolve_schema(schema)
+        t = schema.get("type", "string")
+        if t == "integer":
+            return "number"
+        if t in ("string", "number", "boolean", "object", "array"):
+            return t
+        return "string"
+
+    def _extract_params_from_schema(self, schema: Dict[str, Any]) -> List[ToolParam]:
+        """Extract ToolParam list from a JSON Schema object."""
+        schema = self._resolve_schema(schema)
+        if schema.get("type") != "object":
+            return []
+        required_set = set(schema.get("required", []))
+        params = []
+        for name, prop in schema.get("properties", {}).items():
+            prop = self._resolve_schema(prop)
+            params.append(ToolParam(
+                name=name,
+                type=self._schema_to_type(prop),
+                description=prop.get("description", prop.get("title", "")),
+                required=name in required_set,
+                default=prop.get("default"),
+                enum=prop.get("enum"),
+            ))
+        return params
+
+    def _extract_returns(self, responses: Dict[str, Any]) -> str:
+        """Extract return description from OpenAPI responses."""
+        for code in ("200", "201", "2XX"):
+            resp = responses.get(code, {})
+            if isinstance(resp, dict):
+                desc = resp.get("description", "")
+                # Try to get schema description
+                content = resp.get("content", {})
+                json_content = content.get("application/json", {})
+                schema = json_content.get("schema", {})
+                schema = self._resolve_schema(schema)
+                schema_desc = schema.get("description", schema.get("title", ""))
+                return desc or schema_desc or "Successful response"
+        return "Response"
+
+    def parse_tools(self, app_name: str) -> Dict[str, Dict[str, ToolSpec]]:
+        """
+        Parse OpenAPI spec into ToolSpec objects grouped by tag.
+        
+        Returns:
+            Dict of tag -> {tool_name: ToolSpec}
+        """
+        if not self.spec:
+            raise ValueError("Must call fetch_spec() first")
+
+        tools_by_tag: Dict[str, Dict[str, ToolSpec]] = {}
+
+        for path, path_item in self.spec.get("paths", {}).items():
+            for method, operation in path_item.items():
+                if method.upper() not in ("GET", "POST", "PUT", "DELETE", "PATCH"):
+                    continue
+
+                tags = operation.get("tags", ["default"])
+                tag = tags[0].lower()
+
+                # Tool name from operationId
+                op_id = operation.get("operationId", "")
+                tool_name = op_id.split("_api_")[0] if "_api_" in op_id else op_id
+                if not tool_name:
+                    tool_name = f"{method}_{path.replace('/', '_').strip('_')}"
+
+                # Description
+                summary = operation.get("summary", "")
+                description = operation.get("description", "") or summary
+                if summary and description and summary != description:
+                    description = f"{summary}. {description}"
+
+                # Collect parameters
+                params: List[ToolParam] = []
+
+                # Path and query parameters
+                for p in operation.get("parameters", []):
+                    schema = p.get("schema", {})
+                    params.append(ToolParam(
+                        name=p["name"],
+                        type=self._schema_to_type(schema),
+                        description=p.get("description", ""),
+                        required=p.get("required", p.get("in") == "path"),
+                        default=schema.get("default"),
+                        enum=schema.get("enum"),
+                    ))
+
+                # Request body
+                request_body = operation.get("requestBody", {})
+                if request_body:
+                    content = request_body.get("content", {})
+                    json_content = content.get("application/json", {})
+                    body_schema = json_content.get("schema", {})
+                    if body_schema:
+                        params.extend(self._extract_params_from_schema(body_schema))
+
+                # Returns
+                returns = self._extract_returns(operation.get("responses", {}))
+
+                endpoint = EndpointSpec(
+                    method=method.upper(),
+                    path=path,
+                    description=description or f"{method.upper()} {path}",
+                )
+
+                tool = ToolSpec(
+                    name=tool_name,
+                    description=description or f"{method.upper()} {path}",
+                    parameters=params,
+                    returns=returns,
+                    endpoint=endpoint,
+                    tags=[tag],
+                )
+
+                if tag not in tools_by_tag:
+                    tools_by_tag[tag] = {}
+                tools_by_tag[tag][tool_name] = tool
+
+        return tools_by_tag
+
     def parse_capabilities(
         self,
         app_name: str,

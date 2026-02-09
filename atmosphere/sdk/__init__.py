@@ -23,7 +23,7 @@ Recommended usage (auto-discovery from OpenAPI):
     ```
 """
 
-from .capability import Capability, CapabilityType
+from .capability import Capability, CapabilityType, EndpointSpec, ToolSpec, ToolParam
 from .app import AtmosphereApp
 from .events import EventEmitter
 from .openapi import register_from_openapi
@@ -31,6 +31,9 @@ from .openapi import register_from_openapi
 __all__ = [
     "Capability",
     "CapabilityType",
+    "EndpointSpec",
+    "ToolSpec",
+    "ToolParam",
     "AtmosphereApp",
     "EventEmitter",
     "register_from_openapi",

@@ -6,10 +6,10 @@ from typing import Dict, List, Optional, Callable, Any
 from datetime import datetime
 import httpx
 
-from .capability import Capability, CapabilityType
+from .capability import Capability, CapabilityType, ToolSpec, ToolParam
 from .client import MeshClient
 from .events import EventEmitter
-from .openapi import register_from_openapi
+from .openapi import register_from_openapi, OpenAPIParser
 
 logger = logging.getLogger(__name__)
 
@@ -152,6 +152,94 @@ class AtmosphereApp:
         self._request_handler = handler
         logger.info("Registered custom request handler")
     
+    def get_tools(self) -> Dict[str, ToolSpec]:
+        """Get all tools across all registered capabilities."""
+        tools = {}
+        for cap in self._capabilities:
+            tools.update(cap.tools)
+        return tools
+
+    def get_tool(self, tool_name: str) -> Optional[ToolSpec]:
+        """Find a tool by name across all capabilities."""
+        for cap in self._capabilities:
+            if tool_name in cap.tools:
+                return cap.tools[tool_name]
+        return None
+
+    async def call_tool(self, tool_name: str, **params: Any) -> Any:
+        """
+        Call a tool by name with parameters.
+        
+        Resolves the tool to its underlying HTTP endpoint, validates
+        parameters, and makes the request.
+        
+        Args:
+            tool_name: Name of the tool (e.g., "get_active_anomalies")
+            **params: Tool parameters
+            
+        Returns:
+            Response data from the app
+            
+        Raises:
+            ValueError: If tool not found or required params missing
+        """
+        tool = self.get_tool(tool_name)
+        if not tool:
+            available = list(self.get_tools().keys())
+            raise ValueError(f"Tool '{tool_name}' not found. Available: {available}")
+
+        # Validate required parameters
+        for p in tool.parameters:
+            if p.required and p.name not in params and p.default is None:
+                raise ValueError(f"Missing required parameter '{p.name}' for tool '{tool_name}'")
+
+        # Fill defaults
+        for p in tool.parameters:
+            if p.name not in params and p.default is not None:
+                params[p.name] = p.default
+
+        # Build HTTP request from endpoint spec
+        ep = tool.endpoint
+        method = ep.method.upper()
+        path = ep.path
+        url = f"{self.app_base_url}{path}"
+
+        # Separate path params, query params, body params
+        path_params = {}
+        query_params = {}
+        body_params = {}
+
+        # Identify path parameters from the URL template
+        import re
+        path_param_names = set(re.findall(r'\{(\w+)\}', path))
+
+        for key, value in params.items():
+            if key in path_param_names:
+                path_params[key] = value
+                url = url.replace(f"{{{key}}}", str(value))
+            elif method == "GET":
+                query_params[key] = value
+            else:
+                body_params[key] = value
+
+        logger.debug(f"Calling tool {tool_name}: {method} {url}")
+
+        if method == "GET":
+            response = await self._http_client.get(url, params=query_params)
+        elif method in ("POST", "PUT", "PATCH"):
+            response = await self._http_client.request(method, url, json=body_params if body_params else None)
+        elif method == "DELETE":
+            response = await self._http_client.delete(url, params=query_params)
+        else:
+            response = await self._http_client.request(method, url)
+
+        response.raise_for_status()
+
+        try:
+            return response.json()
+        except Exception:
+            return {"data": response.text}
+
     async def start(self) -> None:
         """
         Start the application and connect to mesh.
@@ -390,6 +478,11 @@ class AtmosphereApp:
         response = await self._http_client.get(url)
         response.raise_for_status()
         spec = response.json()
+
+        # Parse tools from the spec
+        parser = OpenAPIParser(url)
+        parser.spec = spec
+        tools_by_tag = parser.parse_tools(self.name)
         
         # Noise words to exclude from keyword extraction
         NOISE_WORDS = {
@@ -511,12 +604,16 @@ class AtmosphereApp:
                 summaries = [ep["summary"] or ep["description"] for ep in endpoints if ep.get("summary") or ep.get("description")]
                 cap_description = f"{tag.title()} operations: " + "; ".join(summaries[:5])
             
+            # Attach tools parsed from OpenAPI
+            tag_tools = tools_by_tag.get(tag, {})
+
             capability = Capability(
                 id=f"app/{self.name}/{tag}",
                 type=inferred_type,
                 description=cap_description,
                 keywords=sorted(all_keywords),
                 endpoints=ep_dict,
+                tools=tag_tools,
                 push_events=push_events.get(tag, []),
             )
             

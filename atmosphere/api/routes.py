@@ -583,6 +583,47 @@ async def call_app_endpoint(
     return result["body"]
 
 
+@router.get("/apps/{app_name}/tools")
+async def get_app_tools(app_name: str):
+    """
+    List all tools available for an app.
+    
+    Returns tool definitions parsed from the app's OpenAPI spec,
+    suitable for LLM function-calling or UI rendering.
+    """
+    from .app_mesh import get_app_mesh_manager
+    app_mesh = get_app_mesh_manager()
+    tools = app_mesh.get_tools_for_app(app_name)
+    if not tools:
+        raise HTTPException(status_code=404, detail=f"No tools found for app: {app_name}")
+    return {"app": app_name, "tools": tools}
+
+
+@router.post("/apps/{app_name}/tools/{tool_name}/call")
+async def call_app_tool(app_name: str, tool_name: str, body: AppRequestBody = None):
+    """
+    Call an app tool by name.
+    
+    Example: POST /apps/horizon/tools/scan_anomalies/call
+    Body: {"params": {"severity": "critical"}}
+    """
+    from .app_mesh import get_app_mesh_manager
+    app_mesh = get_app_mesh_manager()
+    
+    result = await app_mesh.handle_tool_call({
+        "type": "tool_call",
+        "app": app_name,
+        "tool": tool_name,
+        "params": body.params if body else {},
+    })
+    
+    if result is None:
+        raise HTTPException(status_code=404, detail=f"Tool not found: {tool_name}")
+    if result.get("status", 200) >= 400:
+        raise HTTPException(status_code=result["status"], detail=result.get("body", {}))
+    return result.get("body", {})
+
+
 @router.get("/mesh/status", response_model=MeshStatus)
 async def mesh_status():
     """Get mesh network status."""
@@ -1803,6 +1844,19 @@ async def mesh_websocket_endpoint(websocket: WebSocket):
                                 }
                             })
                     
+                    elif payload_type == "tool_call":
+                        # Handle tool_call from mesh peer
+                        logger.info(f"🔧 LAN tool_call from {peer_name}: {payload.get('app')}/{payload.get('tool')}")
+                        from .app_mesh import get_app_mesh_manager
+                        app_mesh = get_app_mesh_manager()
+                        result = await app_mesh.handle_tool_call(payload)
+                        if result:
+                            await websocket.send_json({
+                                "type": "message",
+                                "from": server.node.node_id if server and server.node else "local",
+                                "payload": result
+                            })
+
                     else:
                         logger.debug(f"Unhandled LAN broadcast: {payload_type}")
                 
