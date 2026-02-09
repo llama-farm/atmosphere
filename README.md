@@ -226,6 +226,27 @@ response = client.chat.completions.create(
 
 ---
 
+## Platforms
+
+| Platform | Status | Repository |
+|----------|--------|------------|
+| **Mac/Linux** (Python) | ✅ Server + WebUI + CLI | This repo |
+| **Android** | ✅ ONNX Vision + Mesh + SDK | [atmosphere-android](https://github.com/llama-farm/atmosphere-android) |
+| **macOS** (SwiftUI) | 🚧 BLE + Chat + Gossip | `AtmosphereMac/` in this repo |
+| **OpenHoof** (Agents) | ✅ Event-driven agents | [openhoof](https://github.com/llama-farm/openhoof) |
+
+### What's Working Today
+
+- **Cross-platform mesh**: Android phone ↔ Mac laptop via LAN + WebSocket relay (~2s latency)
+- **On-device vision**: YOLOv8n ONNX running at 40-60ms/frame on Pixel, 80 COCO classes
+- **Semantic routing**: SimHash + keyword cascade routes queries to the best model/capability
+- **Gossip protocol**: Capabilities propagate across mesh, gradient tables auto-update
+- **WebUI dashboard**: Real-time gossip feed, routing table, capability browser at `:11451`
+- **Android SDK**: Third-party apps bind via AIDL for chat, vision, and mesh status
+- **Vision escalation**: Low-confidence detections auto-route to more powerful mesh peers
+
+---
+
 ## Links
 
 - **[Architecture Deep Dive](ARCHITECTURE.md)** — Full protocol specification
