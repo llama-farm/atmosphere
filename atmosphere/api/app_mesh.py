@@ -139,9 +139,13 @@ class AppMeshManager:
             })
             
             # If mesh is available, propagate to other nodes via gossip
-            if node:
-                gossip_msg = self.registry.generate_available_message(capability)
-                await node.gossip(gossip_msg)
+            if _server and hasattr(_server, 'gossip') and _server.gossip:
+                try:
+                    gossip_msg = self.registry.generate_available_message(capability)
+                    if gossip_msg:
+                        await _server.gossip.broadcast_capabilities()
+                except Exception:
+                    pass  # Gossip propagation is best-effort
             
         except Exception as e:
             logger.error(f"Error registering capability: {e}", exc_info=True)
