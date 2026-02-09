@@ -3,17 +3,20 @@ App Mesh handlers - Route requests to registered applications.
 
 Handles:
 - capability_register: Apps announce their capabilities
-- app_request: Requests routed to apps through the mesh
+- app_request: Requests routed to apps through the mesh  
 - app_response: Responses from apps back to requesters
 - push_event: Events pushed from apps to subscribers
+- HTTP proxy: Direct HTTP calls to registered app endpoints
 """
 
 import asyncio
 import logging
 import time
 import uuid
-from typing import Dict, Any, Optional, Set
+from typing import Dict, Any, Optional, Set, List
 from datetime import datetime
+
+import httpx
 
 logger = logging.getLogger(__name__)
 
@@ -36,8 +39,10 @@ class AppMeshManager:
         """
         self.registry = capability_registry
         self._app_connections: Dict[str, Any] = {}  # app_name -> websocket
+        self._app_base_urls: Dict[str, str] = {}  # app_name -> base URL for HTTP proxy
         self._pending_requests: Dict[str, Dict[str, Any]] = {}  # request_id -> request_info
         self._event_subscriptions: Dict[str, Set[str]] = {}  # event_pattern -> set of subscriber websockets
+        self._http_client = httpx.AsyncClient(timeout=30.0)
         
     async def handle_capability_register(
         self,
@@ -70,10 +75,16 @@ class AppMeshManager:
                 logger.error("Invalid capability_register message")
                 return
             
-            # Store app connection
+            # Store app connection and base URL
             if app_name not in self._app_connections:
                 self._app_connections[app_name] = websocket
                 logger.info(f"Registered app connection: {app_name}")
+            
+            # Store base URL for HTTP proxy (from capability metadata or message)
+            app_base_url = message.get("app_base_url") or capability_data.get("metadata", {}).get("app_base_url")
+            if app_base_url:
+                self._app_base_urls[app_name] = app_base_url
+                logger.info(f"  HTTP proxy: {app_base_url}")
             
             # Convert to Capability and register
             from ..capabilities.registry import Capability, CapabilityType, Tool, Trigger
@@ -108,6 +119,7 @@ class AppMeshManager:
                 triggers=triggers,
                 metadata={
                     "app_name": app_name,
+                    "app_base_url": app_base_url or "",
                     "description": capability_data.get("description", ""),
                     "keywords": capability_data.get("keywords", []),
                     "endpoints": capability_data.get("endpoints", {}),
@@ -359,6 +371,105 @@ class AppMeshManager:
             return event.startswith(prefix)
         return event == pattern
     
+    async def proxy_http_request(
+        self,
+        capability_id: str,
+        endpoint: str,
+        params: Dict[str, Any] = None,
+        method: str = None,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Proxy a request directly to an app via HTTP.
+        
+        This is the fast path — no WebSocket round-trip needed. The mesh
+        node calls the app's HTTP API directly using the stored base URL
+        and endpoint path from the capability's metadata.
+        
+        Args:
+            capability_id: e.g., "app/horizon/anomaly"
+            endpoint: Endpoint name from the capability (e.g., "get_active_anomalies")
+            params: Query params or body params
+            method: HTTP method override (auto-detected from capability if not provided)
+        
+        Returns:
+            {"status": int, "body": dict} or None if capability not found
+        """
+        params = params or {}
+        
+        # Find the capability
+        capability = self.registry.get(capability_id)
+        if not capability:
+            logger.warning(f"Capability not found: {capability_id}")
+            return None
+        
+        # Get app base URL
+        app_name = capability.metadata.get("app_name")
+        base_url = self._app_base_urls.get(app_name) if app_name else None
+        
+        if not base_url:
+            # Try to extract from capability metadata
+            base_url = capability.metadata.get("app_base_url")
+        
+        if not base_url:
+            logger.warning(f"No base URL for app: {app_name}")
+            return None
+        
+        # Find the endpoint spec
+        endpoints = capability.metadata.get("endpoints", {})
+        ep_spec = endpoints.get(endpoint)
+        
+        if not ep_spec:
+            logger.warning(f"Endpoint not found: {endpoint} in {capability_id}")
+            # Try matching by partial name
+            for ep_name, spec in endpoints.items():
+                if endpoint.lower() in ep_name.lower() or ep_name.lower() in endpoint.lower():
+                    ep_spec = spec
+                    break
+        
+        if not ep_spec:
+            logger.warning(f"No matching endpoint for: {endpoint}")
+            return None
+        
+        # Build the HTTP request
+        http_method = (method or ep_spec.get("method", "GET")).upper()
+        path = ep_spec.get("path", f"/{endpoint}")
+        url = f"{base_url.rstrip('/')}{path}"
+        
+        try:
+            if http_method == "GET":
+                response = await self._http_client.get(url, params=params)
+            elif http_method == "POST":
+                response = await self._http_client.post(url, json=params)
+            elif http_method == "PUT":
+                response = await self._http_client.put(url, json=params)
+            elif http_method == "DELETE":
+                response = await self._http_client.delete(url, params=params)
+            else:
+                response = await self._http_client.request(http_method, url, json=params)
+            
+            # Parse response
+            try:
+                body = response.json()
+            except Exception:
+                body = {"text": response.text}
+            
+            logger.info(f"✓ Proxied {http_method} {url} → {response.status_code}")
+            
+            return {
+                "status": response.status_code,
+                "body": body,
+            }
+            
+        except httpx.ConnectError:
+            logger.error(f"App unreachable: {url}")
+            return {"status": 503, "body": {"error": f"App unreachable: {app_name}"}}
+        except httpx.TimeoutException:
+            logger.error(f"App timeout: {url}")
+            return {"status": 504, "body": {"error": f"App timeout: {app_name}"}}
+        except Exception as e:
+            logger.error(f"HTTP proxy error: {e}")
+            return {"status": 500, "body": {"error": str(e)}}
+
     async def disconnect_app(self, app_name: str) -> None:
         """Handle app disconnection."""
         if app_name in self._app_connections:

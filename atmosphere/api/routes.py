@@ -6,6 +6,7 @@ import asyncio
 import logging
 import platform
 import time
+import uuid
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Query, WebSocket, WebSocketDisconnect, File, UploadFile, Form
@@ -490,6 +491,96 @@ async def list_mesh_capabilities():
     #         ...
     
     return announcements
+
+
+# ============ App Mesh REST API ============
+
+@router.get("/apps")
+async def list_apps():
+    """
+    List all registered mesh applications and their capabilities.
+    
+    Returns apps discovered via Atmosphere SDK (OpenAPI auto-discovery).
+    Each app has capabilities with queryable endpoints.
+    """
+    from .app_mesh import get_app_mesh_manager
+    app_mesh = get_app_mesh_manager()
+    
+    # Group capabilities by app
+    apps: Dict[str, Any] = {}
+    
+    from ..capabilities.registry import get_registry
+    registry = get_registry()
+    
+    for cap in registry.list_all():
+        app_name = cap.metadata.get("app_name")
+        if not app_name:
+            continue
+        
+        if app_name not in apps:
+            apps[app_name] = {
+                "name": app_name,
+                "base_url": app_mesh._app_base_urls.get(app_name, cap.metadata.get("app_base_url", "")),
+                "connected": app_name in app_mesh._app_connections,
+                "capabilities": [],
+            }
+        
+        apps[app_name]["capabilities"].append({
+            "id": cap.id,
+            "type": cap.type.value,
+            "description": cap.metadata.get("description", ""),
+            "keywords": cap.metadata.get("keywords", []),
+            "endpoints": cap.metadata.get("endpoints", {}),
+            "push_events": [t.event for t in cap.triggers],
+            "status": cap.status,
+        })
+    
+    return {
+        "count": len(apps),
+        "apps": list(apps.values()),
+        "stats": app_mesh.get_stats(),
+    }
+
+
+class AppRequestBody(BaseModel):
+    """Request body for app endpoint calls."""
+    params: Dict[str, Any] = Field(default_factory=dict, description="Request parameters")
+    method: Optional[str] = Field(None, description="HTTP method override")
+
+
+@router.post("/apps/{capability_id:path}/call/{endpoint}")
+async def call_app_endpoint(
+    capability_id: str,
+    endpoint: str,
+    body: AppRequestBody = None,
+):
+    """
+    Call an app endpoint through the mesh.
+    
+    Routes the request to the registered app via HTTP proxy.
+    
+    Example: POST /apps/app/horizon/anomaly/call/get_active_anomalies
+    """
+    from .app_mesh import get_app_mesh_manager
+    app_mesh = get_app_mesh_manager()
+    
+    params = body.params if body else {}
+    method = body.method if body else None
+    
+    result = await app_mesh.proxy_http_request(
+        capability_id=capability_id,
+        endpoint=endpoint,
+        params=params,
+        method=method,
+    )
+    
+    if result is None:
+        raise HTTPException(status_code=404, detail=f"Capability not found: {capability_id}")
+    
+    if result["status"] >= 400:
+        raise HTTPException(status_code=result["status"], detail=result["body"])
+    
+    return result["body"]
 
 
 @router.get("/mesh/status", response_model=MeshStatus)
@@ -1580,6 +1671,38 @@ async def mesh_websocket_endpoint(websocket: WebSocket):
                     })
                     logger.info(f"🏠 Sent {len(server.gossip._local_capabilities)} capabilities to LAN peer")
                 
+                # Also send registered app capabilities
+                from .app_mesh import get_app_mesh_manager
+                from ..capabilities.registry import get_registry
+                app_mesh = get_app_mesh_manager()
+                registry = get_registry()
+                app_caps = [
+                    cap for cap in registry.list_all()
+                    if cap.metadata.get("app_name") and cap.type.value.startswith("app/")
+                ]
+                if app_caps:
+                    for cap in app_caps:
+                        await websocket.send_json({
+                            "type": "message",
+                            "from": node_id,
+                            "payload": {
+                                "type": "capability_announce",
+                                "node_id": node_id,
+                                "capabilities": [{
+                                    "id": cap.id,
+                                    "type": cap.type.value,
+                                    "description": cap.metadata.get("description", ""),
+                                    "keywords": cap.metadata.get("keywords", []),
+                                    "endpoints": cap.metadata.get("endpoints", {}),
+                                    "push_events": [t.event for t in cap.triggers],
+                                    "app_name": cap.metadata.get("app_name"),
+                                    "app_base_url": cap.metadata.get("app_base_url", ""),
+                                    "status": cap.status,
+                                }],
+                            },
+                        })
+                    logger.info(f"🏠 Sent {len(app_caps)} app capabilities to LAN peer")
+                
                 break
             elif msg_type == "ping":
                 await websocket.send_json({"type": "pong"})
@@ -1641,6 +1764,44 @@ async def mesh_websocket_endpoint(websocket: WebSocket):
                             await server._bridge_message(payload, "lan")
                         except Exception as e:
                             logger.warning(f"Failed to process LAN gossip: {e}")
+                    
+                    elif payload_type == "app_request":
+                        # Handle app request from mesh peer — route to registered app
+                        logger.info(f"🏠 LAN app_request from {peer_name}: {payload.get('capability_id')}/{payload.get('endpoint')}")
+                        from .app_mesh import get_app_mesh_manager
+                        app_mesh = get_app_mesh_manager()
+                        
+                        # Try HTTP proxy first (faster, no WebSocket round-trip)
+                        request_id = payload.get("request_id", str(uuid.uuid4()))
+                        result = await app_mesh.proxy_http_request(
+                            capability_id=payload.get("capability_id"),
+                            endpoint=payload.get("endpoint"),
+                            params=payload.get("params", {}),
+                            method=payload.get("method"),
+                        )
+                        
+                        if result is not None:
+                            await websocket.send_json({
+                                "type": "message",
+                                "from": server.node.node_id if server and server.node else "local",
+                                "payload": {
+                                    "type": "app_response",
+                                    "request_id": request_id,
+                                    "status": result.get("status", 200),
+                                    "body": result.get("body", {}),
+                                }
+                            })
+                        else:
+                            await websocket.send_json({
+                                "type": "message",
+                                "from": server.node.node_id if server and server.node else "local",
+                                "payload": {
+                                    "type": "app_response",
+                                    "request_id": request_id,
+                                    "status": 404,
+                                    "body": {"error": "Capability not found or app unavailable"},
+                                }
+                            })
                     
                     else:
                         logger.debug(f"Unhandled LAN broadcast: {payload_type}")

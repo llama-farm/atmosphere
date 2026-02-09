@@ -184,6 +184,7 @@ class AtmosphereApp:
                 "type": "capability_register",
                 "app_name": self.name,
                 "app_description": self.description,
+                "app_base_url": self.app_base_url,
                 "capability": capability.to_dict()
             }
             await self._client.send(message)
