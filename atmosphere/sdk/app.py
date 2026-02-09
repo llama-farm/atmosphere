@@ -6,9 +6,10 @@ from typing import Dict, List, Optional, Callable, Any
 from datetime import datetime
 import httpx
 
-from .capability import Capability
+from .capability import Capability, CapabilityType
 from .client import MeshClient
 from .events import EventEmitter
+from .openapi import register_from_openapi
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +81,63 @@ class AtmosphereApp:
         """
         self._capabilities.append(capability)
         logger.info(f"Registered capability: {capability.id}")
+    
+    async def register_from_openapi(
+        self,
+        openapi_url: Optional[str] = None,
+        capability_type_map: Optional[Dict[str, CapabilityType]] = None,
+        keyword_overrides: Optional[Dict[str, List[str]]] = None,
+        push_events: Optional[Dict[str, List[str]]] = None
+    ) -> None:
+        """
+        Auto-discover and register capabilities from OpenAPI spec.
+        
+        This is the recommended way to register FastAPI apps — it reads
+        endpoint descriptions directly from your route definitions.
+        
+        Example:
+            ```python
+            app = AtmosphereApp("horizon", app_base_url="http://localhost:8074")
+            
+            await app.register_from_openapi(
+                capability_type_map={
+                    "anomaly": CapabilityType.APP_QUERY,
+                    "agent": CapabilityType.APP_ACTION,
+                },
+                keyword_overrides={
+                    "anomaly": ["alert", "critical", "fuel", "weather"],
+                },
+                push_events={
+                    "anomaly": ["anomaly.new", "anomaly.critical"],
+                }
+            )
+            
+            await app.start()
+            ```
+        
+        Args:
+            openapi_url: URL to OpenAPI JSON (defaults to {app_base_url}/openapi.json)
+            capability_type_map: Map tag -> CapabilityType (defaults to APP_QUERY)
+            keyword_overrides: Map tag -> additional keywords
+            push_events: Map tag -> push event names
+        """
+        if openapi_url is None:
+            openapi_url = f"{self.app_base_url}/openapi.json"
+        
+        logger.info(f"Auto-discovering capabilities from {openapi_url}")
+        
+        capabilities = await register_from_openapi(
+            app_name=self.name,
+            openapi_url=openapi_url,
+            capability_type_map=capability_type_map,
+            keyword_overrides=keyword_overrides,
+            push_events=push_events
+        )
+        
+        for capability in capabilities:
+            self.register(capability)
+        
+        logger.info(f"✓ Auto-registered {len(capabilities)} capabilities from OpenAPI spec")
     
     def on_request(self, handler: Callable) -> None:
         """
@@ -279,6 +337,159 @@ class AtmosphereApp:
             if cap.id == capability_id:
                 return cap
         return None
+    
+    async def register_from_openapi(
+        self,
+        openapi_url: str = None,
+        *,
+        prefix_filter: str = "/api/",
+        group_by_tag: bool = True,
+        extra_keywords: Dict[str, List[str]] = None,
+        push_events: Dict[str, List[str]] = None,
+    ) -> int:
+        """
+        Auto-discover and register capabilities from an OpenAPI spec.
+        
+        This reads the FastAPI/OpenAPI JSON and creates capabilities
+        automatically — endpoint descriptions, parameters, and types
+        come directly from the spec. Zero duplication.
+        
+        Args:
+            openapi_url: URL to fetch OpenAPI JSON (default: {app_base_url}/openapi.json)
+            prefix_filter: Only include paths starting with this prefix
+            group_by_tag: Group endpoints into capabilities by their first tag
+            extra_keywords: Additional keywords per tag/capability (e.g. {"anomaly": ["alert", "fuel"]})
+            push_events: Push events per tag/capability (e.g. {"anomaly": ["anomaly.new"]})
+        
+        Returns:
+            Number of capabilities registered
+        
+        Example:
+            ```python
+            app = AtmosphereApp("horizon", mesh_url="http://localhost:11451")
+            
+            # One line: auto-discover everything from FastAPI
+            await app.register_from_openapi()
+            
+            # Or with enrichment:
+            await app.register_from_openapi(
+                extra_keywords={"anomaly": ["fuel", "deviation", "threat"]},
+                push_events={"anomaly": ["anomaly.new", "anomaly.critical"]}
+            )
+            
+            await app.start()
+            ```
+        """
+        url = openapi_url or f"{self.app_base_url}/openapi.json"
+        extra_keywords = extra_keywords or {}
+        push_events = push_events or {}
+        
+        logger.info(f"Discovering capabilities from OpenAPI spec: {url}")
+        
+        response = await self._http_client.get(url)
+        response.raise_for_status()
+        spec = response.json()
+        
+        # Group paths by tag
+        tag_endpoints: Dict[str, List[Dict]] = {}
+        tag_descriptions: Dict[str, str] = {}
+        
+        # Extract tag descriptions from spec
+        for tag_info in spec.get("tags", []):
+            tag_descriptions[tag_info["name"].lower()] = tag_info.get("description", "")
+        
+        for path, methods in spec.get("paths", {}).items():
+            if prefix_filter and not path.startswith(prefix_filter):
+                continue
+            
+            for method, operation in methods.items():
+                if method in ("parameters", "servers", "summary", "description"):
+                    continue  # skip non-method keys
+                
+                tags = operation.get("tags", ["default"])
+                tag = tags[0].lower() if group_by_tag else "default"
+                
+                if tag not in tag_endpoints:
+                    tag_endpoints[tag] = []
+                
+                # Build endpoint name from operationId or path
+                op_id = operation.get("operationId", "")
+                # FastAPI generates operationId like "get_active_anomalies_api_anomaly_active_get"
+                # Clean it up
+                endpoint_name = op_id.split("_api_")[0] if "_api_" in op_id else op_id
+                if not endpoint_name:
+                    endpoint_name = f"{method}_{path.replace('/', '_').strip('_')}"
+                
+                summary = operation.get("summary", "")
+                description = operation.get("description", summary)
+                
+                # Extract keywords from description
+                desc_words = set(
+                    w.lower().strip(".,!?()") 
+                    for w in (description + " " + summary).split() 
+                    if len(w) > 3
+                )
+                
+                tag_endpoints[tag].append({
+                    "name": endpoint_name,
+                    "method": method.upper(),
+                    "path": path,
+                    "description": description or summary or f"{method.upper()} {path}",
+                    "summary": summary,
+                    "parameters": [
+                        {
+                            "name": p.get("name"),
+                            "in": p.get("in"),
+                            "required": p.get("required", False),
+                            "description": p.get("description", ""),
+                        }
+                        for p in operation.get("parameters", [])
+                    ],
+                    "keywords": desc_words,
+                })
+        
+        # Create a Capability for each tag group
+        count = 0
+        for tag, endpoints in tag_endpoints.items():
+            # Merge keywords from all endpoints + extras
+            all_keywords = set()
+            all_keywords.add(tag)
+            all_keywords.add(self.name)
+            for ep in endpoints:
+                all_keywords.update(ep["keywords"])
+            if tag in extra_keywords:
+                all_keywords.update(extra_keywords[tag])
+            
+            # Build endpoints dict
+            ep_dict = {}
+            for ep in endpoints:
+                ep_dict[ep["name"]] = {
+                    "method": ep["method"],
+                    "path": ep["path"],
+                    "description": ep["description"],
+                }
+            
+            # Use tag description from spec, or auto-generate
+            cap_description = tag_descriptions.get(tag, "")
+            if not cap_description:
+                summaries = [ep["summary"] or ep["description"] for ep in endpoints if ep.get("summary") or ep.get("description")]
+                cap_description = f"{tag.title()} operations: " + "; ".join(summaries[:5])
+            
+            capability = Capability(
+                id=f"app/{self.name}/{tag}",
+                type="app/query",
+                description=cap_description,
+                keywords=sorted(all_keywords - {"", "none", "null", "with", "from", "that", "this", "will", "have", "been"}),
+                endpoints=ep_dict,
+                push_events=push_events.get(tag, []),
+            )
+            
+            self.register(capability)
+            count += 1
+            logger.info(f"  Auto-registered: {capability.id} ({len(endpoints)} endpoints)")
+        
+        logger.info(f"✓ Discovered {count} capabilities with {sum(len(e) for e in tag_endpoints.values())} total endpoints")
+        return count
     
     @property
     def is_connected(self) -> bool:
