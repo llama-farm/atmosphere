@@ -390,6 +390,22 @@ class AtmosphereApp:
         response.raise_for_status()
         spec = response.json()
         
+        # Noise words to exclude from keyword extraction
+        NOISE_WORDS = {
+            "", "none", "null", "with", "from", "that", "this", "will", "have",
+            "been", "the", "and", "for", "are", "but", "not", "you", "all",
+            "can", "her", "was", "one", "our", "out", "when", "which", "their",
+            "said", "each", "tell", "does", "set", "three", "want", "air",
+            "well", "also", "play", "small", "end", "put", "home", "read",
+            "hand", "port", "large", "spell", "add", "even", "land", "here",
+            "must", "big", "high", "such", "follow", "act", "why", "ask",
+            "men", "change", "went", "light", "kind", "off", "need", "house",
+            "picture", "try", "again", "animal", "point", "mother", "world",
+            "near", "build", "self", "earth", "father", "get", "its", "only",
+            "optional", "optionally", "returns", "return", "filtered", "filter",
+            "data", "list", "status", "current", "including",
+        }
+        
         # Group paths by tag
         tag_endpoints: Dict[str, List[Dict]] = {}
         tag_descriptions: Dict[str, str] = {}
@@ -423,12 +439,12 @@ class AtmosphereApp:
                 summary = operation.get("summary", "")
                 description = operation.get("description", summary)
                 
-                # Extract keywords from description
+                # Extract keywords from description (words > 4 chars, excluding noise)
                 desc_words = set(
-                    w.lower().strip(".,!?()") 
+                    w.lower().strip(".,!?()—-:;\"'") 
                     for w in (description + " " + summary).split() 
-                    if len(w) > 3
-                )
+                    if len(w) > 4
+                ) - NOISE_WORDS
                 
                 tag_endpoints[tag].append({
                     "name": endpoint_name,
@@ -451,6 +467,24 @@ class AtmosphereApp:
         # Create a Capability for each tag group
         count = 0
         for tag, endpoints in tag_endpoints.items():
+            # Auto-infer capability type from HTTP methods used
+            methods_used = {ep["method"] for ep in endpoints}
+            has_mutations = bool(methods_used & {"POST", "PUT", "DELETE", "PATCH"})
+            has_reads = "GET" in methods_used
+            has_stream = any("stream" in ep["path"] or "sse" in ep["path"] or "events" in ep["path"] for ep in endpoints)
+            has_query = any("query" in ep["path"] or "search" in ep["path"] or "ask" in ep["path"] for ep in endpoints)
+            
+            if has_stream:
+                inferred_type = "app/stream"
+            elif has_query:
+                inferred_type = "app/chat"
+            elif has_mutations and not has_reads:
+                inferred_type = "app/action"
+            elif has_mutations and has_reads:
+                inferred_type = "app/action"  # Mixed = action (superset)
+            else:
+                inferred_type = "app/query"
+            
             # Merge keywords from all endpoints + extras
             all_keywords = set()
             all_keywords.add(tag)
@@ -459,6 +493,7 @@ class AtmosphereApp:
                 all_keywords.update(ep["keywords"])
             if tag in extra_keywords:
                 all_keywords.update(extra_keywords[tag])
+            all_keywords -= NOISE_WORDS
             
             # Build endpoints dict
             ep_dict = {}
@@ -477,16 +512,16 @@ class AtmosphereApp:
             
             capability = Capability(
                 id=f"app/{self.name}/{tag}",
-                type="app/query",
+                type=inferred_type,
                 description=cap_description,
-                keywords=sorted(all_keywords - {"", "none", "null", "with", "from", "that", "this", "will", "have", "been"}),
+                keywords=sorted(all_keywords),
                 endpoints=ep_dict,
                 push_events=push_events.get(tag, []),
             )
             
             self.register(capability)
             count += 1
-            logger.info(f"  Auto-registered: {capability.id} ({len(endpoints)} endpoints)")
+            logger.info(f"  Auto-registered: {capability.id} ({len(endpoints)} endpoints, type={inferred_type})")
         
         logger.info(f"✓ Discovered {count} capabilities with {sum(len(e) for e in tag_endpoints.values())} total endpoints")
         return count
