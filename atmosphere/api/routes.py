@@ -1811,6 +1811,45 @@ async def websocket_endpoint(websocket: WebSocket):
                                     "request_id": request_id
                                 })
                     
+                    # ==================== APP MESH HANDLERS ====================
+                    
+                    elif msg_type == "capability_register":
+                        # Handle app capability registration
+                        from .app_mesh import get_app_mesh_manager
+                        app_mesh = get_app_mesh_manager()
+                        await app_mesh.handle_capability_register(data, websocket)
+                    
+                    elif msg_type == "app_request":
+                        # Handle request to app capability
+                        from .app_mesh import get_app_mesh_manager
+                        app_mesh = get_app_mesh_manager()
+                        await app_mesh.handle_app_request(data, websocket)
+                    
+                    elif msg_type == "app_response":
+                        # Handle response from app
+                        from .app_mesh import get_app_mesh_manager
+                        app_mesh = get_app_mesh_manager()
+                        await app_mesh.handle_app_response(data, websocket)
+                    
+                    elif msg_type == "push_event":
+                        # Handle push event from app
+                        from .app_mesh import get_app_mesh_manager
+                        app_mesh = get_app_mesh_manager()
+                        await app_mesh.handle_push_event(data, websocket)
+                    
+                    elif msg_type == "subscribe_events":
+                        # Subscribe to push events
+                        from .app_mesh import get_app_mesh_manager
+                        app_mesh = get_app_mesh_manager()
+                        patterns = data.get("patterns", [])
+                        await app_mesh.subscribe_to_events(patterns, websocket)
+                        await websocket.send_json({
+                            "type": "subscribed",
+                            "patterns": patterns
+                        })
+                    
+                    # ==================== END APP MESH ====================
+                    
                     else:
                         logger.debug(f"Unknown message type: {msg_type}")
                         

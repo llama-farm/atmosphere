@@ -61,6 +61,12 @@ class CapabilityType(Enum):
     # Compute
     COMPUTE_GPU = "compute/gpu"
     COMPUTE_SANDBOX = "compute/sandbox"
+    
+    # Applications (mesh-registered apps)
+    APP_QUERY = "app/query"        # Read data from an app
+    APP_ACTION = "app/action"      # Trigger actions (approve, resolve, etc.)
+    APP_STREAM = "app/stream"      # Subscribe to real-time events
+    APP_CHAT = "app/chat"          # Natural language interface to an app
 
 
 @dataclass
