@@ -1867,6 +1867,20 @@ async def mesh_websocket_endpoint(websocket: WebSocket):
                     except Exception as e:
                         logger.warning(f"Failed to process LAN gossip: {e}")
                 
+                elif msg_type == "capability_register":
+                    # App SDK capability registration (direct, not broadcast)
+                    from .app_mesh import get_app_mesh_manager
+                    app_mesh = get_app_mesh_manager()
+                    await app_mesh.handle_capability_register(data, websocket)
+                
+                elif msg_type == "tool_call":
+                    # Direct tool_call (not wrapped in broadcast)
+                    from .app_mesh import get_app_mesh_manager
+                    app_mesh = get_app_mesh_manager()
+                    result = await app_mesh.handle_tool_call(data)
+                    if result:
+                        await websocket.send_json(result)
+                
                 else:
                     logger.debug(f"Unknown LAN message: {msg_type}")
         

@@ -57,8 +57,12 @@ class AtmosphereApp:
         
         # Convert HTTP URL to WebSocket
         ws_url = mesh_url.replace("http://", "ws://").replace("https://", "wss://")
-        if not ws_url.endswith("/ws"):
-            ws_url = ws_url.rstrip("/") + "/ws"
+        # Connect to the relay-protocol WebSocket endpoint
+        if "/mesh/ws" not in ws_url:
+            ws_url = ws_url.rstrip("/") + "/api/mesh/ws"
+        elif ws_url.endswith("/mesh/ws") and "/api/mesh/ws" not in ws_url:
+            # Fix bare /mesh/ws → /api/mesh/ws
+            ws_url = ws_url.rsplit("/mesh/ws", 1)[0] + "/api/mesh/ws"
         
         self._client = MeshClient(ws_url)
         self._capabilities: List[Capability] = []
@@ -253,6 +257,17 @@ class AtmosphereApp:
         
         # Connect to mesh
         await self._client.connect()
+        
+        # Send join message (relay protocol)
+        import uuid
+        await self._client.send({
+            "type": "join",
+            "node_id": f"app-{self.name}-{uuid.uuid4().hex[:8]}",
+            "name": self.name,
+            "mesh_id": "home-mesh"
+        })
+        # Brief wait for joined confirmation
+        await asyncio.sleep(0.5)
         
         # Announce capabilities
         await self._announce_capabilities()

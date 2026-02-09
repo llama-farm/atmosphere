@@ -88,10 +88,10 @@ class AppMeshManager:
             
             # Convert to Capability and register
             from ..capabilities.registry import Capability, CapabilityType, Tool, Trigger
-            from ..mesh.node import get_node
+            from .server import get_server
             
-            node = get_node()
-            node_id = node.node_id if node else "local"
+            _server = get_server()
+            node_id = _server.node.node_id if _server and _server.node else "local"
             
             # Create tools from endpoints
             tools = []
@@ -444,10 +444,10 @@ class AppMeshManager:
             logger.debug(f"Delivered event {event} to {len(subscribers)} local subscribers")
             
             # Propagate to other mesh nodes via gossip
-            from ..mesh.node import get_node
-            node = get_node()
-            if node:
-                await node.gossip({
+            from .server import get_server
+            _server = get_server()
+            if _server and _server.node:
+                await _server.node.gossip({
                     "type": "push_event",
                     "event": event,
                     "data": data,
