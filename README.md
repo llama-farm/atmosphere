@@ -231,7 +231,7 @@ response = client.chat.completions.create(
 | Platform | Status | Repository |
 |----------|--------|------------|
 | **Mac/Linux** (Python) | ✅ Server + WebUI + CLI | This repo |
-| **Android** | ✅ ONNX Vision + Mesh + SDK | [atmosphere-android](https://github.com/llama-farm/atmosphere-android) |
+| **Android** | ✅ SDK + HORIZON + Vision + On-device LLM | [atmosphere-android](https://github.com/llama-farm/atmosphere-android) |
 | **macOS** (SwiftUI) | 🚧 BLE + Chat + Gossip | `AtmosphereMac/` in this repo |
 | **OpenHoof** (Agents) | ✅ Event-driven agents | [openhoof](https://github.com/llama-farm/openhoof) |
 
@@ -244,6 +244,44 @@ response = client.chat.completions.create(
 - **WebUI dashboard**: Real-time gossip feed, routing table, capability browser at `:11451`
 - **Android SDK**: Third-party apps bind via AIDL for chat, vision, and mesh status
 - **Vision escalation**: Low-confidence detections auto-route to more powerful mesh peers
+- **HORIZON E2E demo**: Android HORIZON app → Atmosphere mesh → HORIZON backend tools, fully functional end-to-end
+
+---
+
+## Android SDK
+
+The Android SDK lives at [`atmosphere-android/atmosphere-sdk/`](https://github.com/llama-farm/atmosphere-android/tree/master/atmosphere-sdk) and uses an **AIDL binder service pattern** to expose the full Atmosphere mesh to any Android app.
+
+Third-party apps connect in three lines:
+
+```kotlin
+val client = AtmosphereClient(context)
+client.connect()
+
+val response = client.chat("What do llamas eat?")
+val mission  = client.callTool("horizon", "get_mission_summary", emptyMap())
+val objects  = client.detectObjects(bitmap)
+```
+
+The **HORIZON app** (`horizon-app/`) is the reference implementation of an app built entirely on the SDK — it has zero inference code of its own and delegates everything through the Atmosphere mesh.
+
+See the [atmosphere-android repo](https://github.com/llama-farm/atmosphere-android) for full SDK documentation and build instructions.
+
+---
+
+## App Mesh (Tool Routing)
+
+Backend services register with the mesh via **OpenAPI auto-discovery** (see `bridge_horizon.py` for the pattern). Once registered, any phone app can call tools through the mesh:
+
+```kotlin
+// Phone app calls a backend tool through the mesh
+val summary = client.callTool("horizon", "get_mission_summary", params)
+```
+
+The mesh handles:
+- **Routing** — resolves the target app/service by name
+- **Parameter passing** — forwards params to the correct OpenAPI endpoint
+- **Response envelope unwrapping** — returns clean results to the caller
 
 ---
 
