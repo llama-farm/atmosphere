@@ -530,6 +530,34 @@ class AppMeshManager:
         
         # Find the capability
         capability = self.registry.get(capability_id)
+        
+        # If capability_id is just an app name (e.g., "horizon"), resolve via base URL
+        if not capability and capability_id in self._app_base_urls:
+            base_url = self._app_base_urls[capability_id]
+            # The endpoint IS the path (e.g., "/api/mission/summary")
+            if endpoint and endpoint.startswith("/"):
+                url = f"{base_url.rstrip('/')}{endpoint}"
+                _method = (method or "GET").upper()
+                try:
+                    async with httpx.AsyncClient(timeout=10.0) as client:
+                        if _method == "GET":
+                            response = await client.get(url, params=params)
+                        elif _method in ("POST", "PUT", "PATCH"):
+                            response = await client.request(_method, url, json=params if params else None)
+                        else:
+                            response = await client.request(_method, url)
+                        try:
+                            body = response.json()
+                        except Exception:
+                            body = {"text": response.text}
+                        logger.info(f"✓ App proxy {capability_id}{endpoint} → {response.status_code}")
+                        return {"status": response.status_code, "body": body}
+                except Exception as e:
+                    logger.error(f"App proxy error: {e}")
+                    return {"status": 503, "body": {"error": str(e)}}
+            logger.warning(f"Capability not found and no valid path: {capability_id}/{endpoint}")
+            return None
+
         if not capability:
             logger.warning(f"Capability not found: {capability_id}")
             return None

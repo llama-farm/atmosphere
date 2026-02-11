@@ -19,7 +19,7 @@ class OllamaConfig:
     """Ollama backend configuration."""
     host: str = "localhost"
     port: int = 11434
-    timeout: float = 120.0
+    timeout: float = 5.0
     default_model: str = "llama3.2"
     embedding_model: str = "nomic-embed-text"
     

@@ -146,7 +146,9 @@ class AtmosphereServer:
         
         # Initialize router
         self.router = SemanticRouter(node_id=self.node.node_id)
+        print("[INIT] Router initializing...", flush=True)
         await self.router.initialize()
+        print("[INIT] Router done", flush=True)
         
         # Initialize mesh-aware router (uses gossip data, latency, cost)
         self.mesh_router = MeshRouter(
@@ -156,7 +158,12 @@ class AtmosphereServer:
         )
         
         # Register capabilities based on available backends
-        await self._register_capabilities()
+        print("[INIT] Registering capabilities...", flush=True)
+        try:
+            await asyncio.wait_for(self._register_capabilities(), timeout=15.0)
+        except asyncio.TimeoutError:
+            print("[INIT] ⚠️ Capability registration timed out (15s), continuing...", flush=True)
+        print("[INIT] Capabilities done", flush=True)
         
         # Initialize executor
         self.executor = Executor(
@@ -164,7 +171,12 @@ class AtmosphereServer:
             node_id=self.node.node_id,
             port=self.config.server.port
         )
-        await self.executor.initialize()
+        print("[INIT] Executor initializing...", flush=True)
+        try:
+            await asyncio.wait_for(self.executor.initialize(), timeout=10.0)
+        except asyncio.TimeoutError:
+            print("[INIT] ⚠️ Executor init timed out (10s), continuing...", flush=True)
+        print("[INIT] Executor done", flush=True)
         
         # Register LlamaFarm project handler
         self.executor.register_handler("llamafarm_project", self._handle_llamafarm_project)
@@ -424,22 +436,29 @@ class AtmosphereServer:
     
     async def start(self) -> None:
         """Start the server and all services."""
-        logger.debug("Starting AtmosphereServer")
+        print("[START] Beginning server start...", flush=True)
         await self.initialize()
-        logger.debug("Initialization complete")
+        print("[START] Initialize complete", flush=True)
         
         # Start mDNS discovery
         if self.discovery:
+            print("[START] Starting mDNS...", flush=True)
             await self.discovery.start()
         
         # Connect to relay server for NAT traversal
+        print("[START] Connecting to relay...", flush=True)
         await self._connect_to_relay()
+        print("[START] Relay done", flush=True)
         
         # Start gossip protocol for capability propagation
+        print("[START] Starting gossip...", flush=True)
         await self._start_gossip()
+        print("[START] Gossip done", flush=True)
         
         # Start BLE transport and pairing (Mac/iOS only)
+        print("[START] Starting BLE...", flush=True)
         await self._start_ble()
+        print("[START] BLE done", flush=True)
         
         self._running = True
         logger.info(
@@ -535,6 +554,10 @@ class AtmosphereServer:
         - Proximity pairing with tap-to-pair UX
         - Automatic credential exchange
         """
+        import os
+        if os.environ.get('ATMOSPHERE_BLE_DISABLED'):
+            print('[BLE] Disabled via ATMOSPHERE_BLE_DISABLED', flush=True)
+            return
         print(f"[BLE] _start_ble called, platform={platform.system()}", flush=True)
         # Only start BLE on supported platforms
         if platform.system() not in ['Darwin', 'iOS']:
@@ -1079,6 +1102,35 @@ class AtmosphereServer:
                             "payload": response
                         })
                         logger.info(f"✅ Sent inference response to {from_node}")
+                
+                # Handle tool_call from mesh peers (e.g. phone calling HORIZON tools)
+                elif payload_type == "tool_call":
+                    logger.info(f"🔧 Relay tool_call from {from_node}: {payload.get('app')}/{payload.get('tool')}")
+                    from .app_mesh import get_app_mesh_manager
+                    app_mesh = get_app_mesh_manager()
+                    result = await app_mesh.handle_tool_call(payload)
+                    if result and self.relay_client:
+                        # Send tool response back to requesting node via relay
+                        result["target_node"] = from_node
+                        result["type"] = "tool_response"
+                        await self._send_to_relay({
+                            "type": "broadcast",
+                            "payload": result
+                        })
+                        logger.info(f"✅ Sent tool_response to {from_node}: {payload.get('app')}/{payload.get('tool')}")
+                
+                # Handle tool_response destined for this node (from another peer)
+                elif payload_type == "tool_response":
+                    target = payload.get("target_node", "")
+                    node_id = self.node.node_id if self.node else ""
+                    if target == node_id or not target:
+                        # Forward to local WebSocket clients (the SDK app or LAN peer)
+                        logger.info(f"📥 tool_response from {from_node}, forwarding to local clients")
+                        await manager.broadcast({
+                            "type": "tool_response",
+                            "from": from_node,
+                            "payload": payload
+                        })
                 
                 # Also handle legacy "gossip" type for backwards compatibility
                 elif payload_type == "gossip" and self.gossip:

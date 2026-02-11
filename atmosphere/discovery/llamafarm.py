@@ -19,7 +19,7 @@ class LlamaFarmConfig:
     host: str = "localhost"
     port: int = 14345  # LlamaFarm default port
     api_key: Optional[str] = None
-    timeout: float = 120.0
+    timeout: float = 5.0
     
     @property
     def base_url(self) -> str:
