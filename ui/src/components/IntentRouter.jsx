@@ -1,8 +1,19 @@
 import React, { useState, useEffect } from 'react';
-import { Send, Zap, CheckCircle2 } from 'lucide-react';
+import { Send, Zap, CheckCircle2, WifiOff } from 'lucide-react';
+import { useDaemon } from '../hooks/useDaemon';
 import './IntentRouter.css';
 
+// Scorer weights as defined in atmosphere-core
+const SCORER_WEIGHTS = {
+  semantic: 0.4,
+  latency: 0.25,
+  capability: 0.2,
+  hops: 0.1,
+  cost: 0.05,
+};
+
 export const IntentRouter = () => {
+  const { isConnected } = useDaemon();
   const [intent, setIntent] = useState('');
   const [routing, setRouting] = useState(false);
   const [result, setResult] = useState(null);
@@ -64,7 +75,39 @@ export const IntentRouter = () => {
     <div className="intent-router fade-in">
       <div className="router-header">
         <h1>Intent Router Demo</h1>
-        <p>Type an intent and watch it route to the correct node with the right capability</p>
+        <p>
+          Type an intent and watch it route to the correct node with the right capability
+          {!isConnected && (
+            <span style={{ color: '#f59e0b', marginLeft: '8px' }}>
+              <WifiOff size={14} style={{ display: 'inline', verticalAlign: 'middle' }} />
+              {' '}Daemon offline
+            </span>
+          )}
+        </p>
+      </div>
+
+      {/* Scorer Weights Display */}
+      <div className="scorer-weights">
+        <h3>Routing Scorer Weights</h3>
+        <div className="weights-grid">
+          {Object.entries(SCORER_WEIGHTS).map(([name, weight]) => (
+            <div key={name} className="weight-item">
+              <div className="weight-bar-container">
+                <div 
+                  className="weight-bar" 
+                  style={{ 
+                    width: `${weight * 100}%`,
+                    backgroundColor: `hsl(${weight * 240}, 70%, 55%)`
+                  }}
+                />
+              </div>
+              <div className="weight-label">
+                <span className="weight-name">{name}</span>
+                <span className="weight-value">{(weight * 100).toFixed(0)}%</span>
+              </div>
+            </div>
+          ))}
+        </div>
       </div>
 
       <div className="router-input-section">

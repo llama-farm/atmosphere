@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import * as d3 from 'd3';
-import { Camera, Mic, Brain, Search, Eye, Wrench, Zap, ArrowUp, ArrowDown } from 'lucide-react';
+import { Camera, Mic, Brain, Search, Eye, Wrench, Zap, ArrowUp, ArrowDown, WifiOff } from 'lucide-react';
+import { useDaemon } from '../hooks/useDaemon';
 import './MeshTopology.css';
 
 // Capability type icons and colors
@@ -50,6 +51,7 @@ const getCostLabel = (cost) => {
 };
 
 export const MeshTopology = ({ wsData }) => {
+  const { isConnected, peers: daemonPeers } = useDaemon();
   const svgRef = useRef(null);
   const [nodes, setNodes] = useState([]);
   const [links, setLinks] = useState([]);
@@ -57,7 +59,39 @@ export const MeshTopology = ({ wsData }) => {
   const simulationRef = useRef(null);
 
   useEffect(() => {
-    // Fetch initial mesh topology from real API
+    // Use daemon peers if available
+    if (isConnected && daemonPeers.length > 0) {
+      const nodeData = daemonPeers.map((peer, i) => ({
+        id: peer.id || peer.node_id || `node-${i}`,
+        name: peer.name || `Node ${i + 1}`,
+        capabilities: peer.capabilities || [],
+        capabilityTypes: peer.capability_types || ['llm'],
+        triggers: peer.triggers || [],
+        tools: peer.tools || [],
+        status: peer.status || 'active',
+        cost: peer.cost,
+        costFactors: peer.cost_factors,
+        x: Math.random() * 800,
+        y: Math.random() * 600,
+      }));
+
+      const linkData = daemonPeers.flatMap((peer, i) => {
+        if (!peer.connections) return [];
+        return peer.connections.map(conn => ({
+          source: peer.id || `node-${i}`,
+          target: conn.target_id || conn.peer_id,
+          strength: conn.strength || 1,
+          transportType: conn.transport_type || 'lan',
+          latencyMs: conn.latency_ms,
+        }));
+      });
+
+      setNodes(nodeData);
+      setLinks(linkData);
+      return;
+    }
+
+    // Fallback to old API
     fetch('/api/mesh/topology')
       .then(res => res.json())
       .then(data => {
@@ -123,7 +157,7 @@ export const MeshTopology = ({ wsData }) => {
       setNodes(demoNodes);
       setLinks(demoLinks);
     }
-  }, []);
+  }, [isConnected, daemonPeers]);
 
   useEffect(() => {
     if (!svgRef.current || nodes.length === 0) return;

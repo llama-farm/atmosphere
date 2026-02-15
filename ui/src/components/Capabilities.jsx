@@ -1,9 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import { CapabilityCard } from './CapabilityCard';
-import { Search, RefreshCw, Filter, Layers } from 'lucide-react';
+import { Search, RefreshCw, Filter, Layers, WifiOff } from 'lucide-react';
+import { useDaemon } from '../hooks/useDaemon';
 import './Capabilities.css';
 
 export const Capabilities = () => {
+  const { isConnected, capabilities: daemonCapabilities, refresh } = useDaemon();
   const [capabilities, setCapabilities] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -13,61 +15,80 @@ export const Capabilities = () => {
   const fetchCapabilities = async () => {
     setLoading(true);
     try {
-      const response = await fetch('/api/capabilities');
-      if (!response.ok) throw new Error('Failed to fetch capabilities');
-      const data = await response.json();
-      
-      // Transform API response to match CapabilityCard format
-      const transformed = data.map(cap => ({
-        id: cap.id,
-        type: guessCapabilityType(cap.label, cap.handler),
-        status: 'online',
-        triggers: cap.triggers || [],
-        tools: cap.models?.length ? cap.models : [cap.handler],
-        nodeId: 'local',
-        lastSeen: new Date().toISOString(),
-        description: cap.description,
-        label: cap.label,
-      }));
-      
-      setCapabilities(transformed);
-      setError(null);
+      if (isConnected && daemonCapabilities.length > 0) {
+        // Use daemon CRDT capabilities
+        const transformed = daemonCapabilities.map(cap => ({
+          id: cap.id || cap.capability_id,
+          type: guessCapabilityType(cap.label || cap.name, cap.handler || cap.type),
+          status: 'online',
+          triggers: cap.triggers || [],
+          tools: cap.tools || cap.models || [],
+          nodeId: cap.node_id || 'local',
+          lastSeen: cap.last_seen || new Date().toISOString(),
+          description: cap.description,
+          label: cap.label || cap.name,
+        }));
+        setCapabilities(transformed);
+        setError(null);
+      } else {
+        // Fallback to old API
+        const response = await fetch('/api/capabilities');
+        if (!response.ok) throw new Error('Failed to fetch capabilities');
+        const data = await response.json();
+        
+        const transformed = data.map(cap => ({
+          id: cap.id,
+          type: guessCapabilityType(cap.label, cap.handler),
+          status: 'online',
+          triggers: cap.triggers || [],
+          tools: cap.models?.length ? cap.models : [cap.handler],
+          nodeId: 'local',
+          lastSeen: new Date().toISOString(),
+          description: cap.description,
+          label: cap.label,
+        }));
+        
+        setCapabilities(transformed);
+        setError(null);
+      }
     } catch (err) {
       console.error('Failed to fetch capabilities:', err);
       setError(err.message);
-      // Use demo data
-      setCapabilities([
-        {
-          id: 'chat-llm',
-          type: 'llm',
-          status: 'online',
-          triggers: [],
-          tools: ['chat', 'complete', 'embed'],
-          nodeId: 'local',
-          lastSeen: new Date().toISOString(),
-          label: 'Chat LLM',
-        },
-        {
-          id: 'anomaly-detector',
-          type: 'sensor/camera',
-          status: 'online',
-          triggers: ['anomaly_detected'],
-          tools: ['detect', 'score'],
-          nodeId: 'local',
-          lastSeen: new Date().toISOString(),
-          label: 'Anomaly Detector',
-        },
-        {
-          id: 'classifier',
-          type: 'llm',
-          status: 'online',
-          triggers: [],
-          tools: ['classify', 'predict'],
-          nodeId: 'local',
-          lastSeen: new Date().toISOString(),
-          label: 'Classifier',
-        },
-      ]);
+      // Use demo data only if daemon is offline
+      if (!isConnected) {
+        setCapabilities([
+          {
+            id: 'chat-llm',
+            type: 'llm',
+            status: 'online',
+            triggers: [],
+            tools: ['chat', 'complete', 'embed'],
+            nodeId: 'local',
+            lastSeen: new Date().toISOString(),
+            label: 'Chat LLM',
+          },
+          {
+            id: 'anomaly-detector',
+            type: 'sensor/camera',
+            status: 'online',
+            triggers: ['anomaly_detected'],
+            tools: ['detect', 'score'],
+            nodeId: 'local',
+            lastSeen: new Date().toISOString(),
+            label: 'Anomaly Detector',
+          },
+          {
+            id: 'classifier',
+            type: 'llm',
+            status: 'online',
+            triggers: [],
+            tools: ['classify', 'predict'],
+            nodeId: 'local',
+            lastSeen: new Date().toISOString(),
+            label: 'Classifier',
+          },
+        ]);
+      }
     } finally {
       setLoading(false);
     }
@@ -85,7 +106,7 @@ export const Capabilities = () => {
 
   useEffect(() => {
     fetchCapabilities();
-  }, []);
+  }, [isConnected, daemonCapabilities]);
 
   const filteredCapabilities = capabilities.filter(cap => {
     const matchesFilter = filter === 'all' || 
@@ -117,10 +138,19 @@ export const Capabilities = () => {
           <Layers size={28} />
           <div>
             <h1>Capabilities</h1>
-            <p>All available capabilities in the mesh</p>
+            <p>
+              {isConnected ? (
+                <>CRDT capabilities from daemon</>
+              ) : (
+                <>
+                  <WifiOff size={14} style={{ display: 'inline', marginRight: '4px' }} />
+                  Daemon offline - showing fallback data
+                </>
+              )}
+            </p>
           </div>
         </div>
-        <button onClick={fetchCapabilities} className="refresh-btn" disabled={loading}>
+        <button onClick={() => { fetchCapabilities(); refresh.capabilities(); }} className="refresh-btn" disabled={loading}>
           <RefreshCw size={18} className={loading ? 'spin' : ''} />
           Refresh
         </button>
