@@ -6,9 +6,13 @@ import { MeshManager } from './MeshManager';
 import { RoutingTable } from './RoutingTable';
 import { TransportStatus } from './TransportStatus';
 import { BlePairingPanel } from './BlePairingPanel';
+import { BigLlamaStatus } from './BigLlamaStatus';
+import { StreamingChat } from './StreamingChat';
+import { useDaemon } from '../hooks/useDaemon';
 import './Dashboard.css';
 
 export const Dashboard = ({ wsData }) => {
+  const { isConnected: daemonConnected, peers: daemonPeers, capabilities: daemonCapabilities, bigLlamaStatus } = useDaemon();
   const [stats, setStats] = useState({
     connectedNodes: 0,
     totalCapabilities: 0,
@@ -25,65 +29,6 @@ export const Dashboard = ({ wsData }) => {
 
   const [recentActivity, setRecentActivity] = useState([]);
 
-  useEffect(() => {
-    // Fetch initial stats from real API
-    fetch('/api/mesh/status')
-      .then(res => res.json())
-      .then(data => {
-        setStats({
-          connectedNodes: data.node_count || data.peer_count + 1 || 1,
-          totalCapabilities: data.capabilities?.length || 0,
-          activeAgents: data.capabilities?.length || 0,
-          meshHealth: 100,
-        });
-      })
-      .catch(err => {
-        console.error('Failed to fetch mesh status:', err);
-      });
-
-    // Fetch capabilities
-    fetch('/api/capabilities')
-      .then(res => res.json())
-      .then(data => {
-        // Process capability breakdown
-        const byType = {};
-        data.forEach(cap => {
-          const type = guessCapabilityType(cap.label, cap.handler);
-          byType[type] = (byType[type] || 0) + 1;
-        });
-        
-        setCapabilityStats(prev => ({
-          ...prev,
-          total: data.length,
-          byType,
-        }));
-        
-        setStats(prev => ({
-          ...prev,
-          totalCapabilities: data.length,
-          activeAgents: data.length,
-        }));
-      })
-      .catch(err => {
-        console.error('Failed to fetch capabilities:', err);
-        // Fallback: try gossip status for capability count
-        fetch('/api/gossip/status')
-          .then(res => res.json())
-          .then(data => {
-            if (data.local_cap_ids) {
-              const byType = {};
-              data.local_cap_ids.forEach(capId => {
-                const type = capId.includes('llamafarm') ? 'llm' : 'tool';
-                byType[type] = (byType[type] || 0) + 1;
-              });
-              setCapabilityStats(prev => ({ ...prev, total: data.local_capabilities || 0, byType }));
-              setStats(prev => ({ ...prev, totalCapabilities: data.local_capabilities || 0, activeAgents: data.local_capabilities || 0 }));
-            }
-          })
-          .catch(() => {});
-      });
-  }, []);
-
   const guessCapabilityType = (label, handler) => {
     const lower = ((label || '') + ' ' + (handler || '')).toLowerCase();
     if (lower.includes('camera') || lower.includes('vision') || lower.includes('image')) return 'sensor/camera';
@@ -93,6 +38,58 @@ export const Dashboard = ({ wsData }) => {
     if (lower.includes('tool') || lower.includes('action')) return 'tool';
     return 'llm';
   };
+
+  // Update stats when daemon peers change
+  useEffect(() => {
+    if (daemonConnected && daemonPeers.length > 0) {
+      setStats(prev => ({
+        ...prev,
+        connectedNodes: daemonPeers.length + 1, // +1 for local node
+      }));
+    }
+  }, [daemonConnected, daemonPeers]);
+
+  // Update capabilities when daemon capabilities change
+  useEffect(() => {
+    if (daemonConnected && daemonCapabilities.length > 0) {
+      const byType = {};
+      daemonCapabilities.forEach(cap => {
+        const type = guessCapabilityType(cap.label || cap.name, cap.handler || cap.type);
+        byType[type] = (byType[type] || 0) + 1;
+      });
+      
+      setCapabilityStats(prev => ({
+        ...prev,
+        total: daemonCapabilities.length,
+        byType,
+      }));
+      
+      setStats(prev => ({
+        ...prev,
+        totalCapabilities: daemonCapabilities.length,
+        activeAgents: daemonCapabilities.length,
+      }));
+    }
+  }, [daemonConnected, daemonCapabilities]);
+
+  useEffect(() => {
+    // Fallback: Fetch initial stats from real API if daemon not connected
+    if (!daemonConnected) {
+      fetch('/api/mesh/status')
+        .then(res => res.json())
+        .then(data => {
+          setStats({
+            connectedNodes: data.node_count || data.peer_count + 1 || 1,
+            totalCapabilities: data.capabilities?.length || 0,
+            activeAgents: data.capabilities?.length || 0,
+            meshHealth: 100,
+          });
+        })
+        .catch(err => {
+          console.error('Failed to fetch mesh status:', err);
+        });
+    }
+  }, [daemonConnected]);
 
   useEffect(() => {
     // Update activity from WebSocket
@@ -193,6 +190,12 @@ export const Dashboard = ({ wsData }) => {
           value={`${stats.meshHealth}%`}
           color="#f59e0b"
         />
+      </div>
+
+      {/* BigLlama Status and Streaming Chat */}
+      <div className="bigllama-section" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px', marginBottom: '20px' }}>
+        <BigLlamaStatus bigLlamaStatus={bigLlamaStatus} isConnected={daemonConnected} />
+        <StreamingChat />
       </div>
 
       {/* 🎯 Intent Classification - THE CROWN JEWEL */}

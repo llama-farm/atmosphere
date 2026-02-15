@@ -14,6 +14,8 @@ import { TestingPanel } from './components/TestingPanel';
 import { ProjectsPanel } from './components/ProjectsPanel';
 import { BlePairingPanel } from './components/BlePairingPanel';
 import VisionPanel from './components/VisionPanel';
+import { StreamingChat } from './components/StreamingChat';
+import { BlobTransfer } from './components/BlobTransfer';
 import { 
   LayoutDashboard, 
   Network, 
@@ -30,17 +32,21 @@ import {
   FlaskConical,
   Folder,
   Bluetooth,
-  Eye
+  Eye,
+  MessageSquare,
+  File
 } from 'lucide-react';
 import './App.css';
 
 const pages = [
   { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard, component: Dashboard },
+  { id: 'chat', label: 'Chat', icon: MessageSquare, component: StreamingChat },
   { id: 'topology', label: 'Mesh Topology', icon: Network, component: MeshTopology },
   { id: 'flow', label: 'Capability Flow', icon: ArrowUpDown, component: BidirectionalFlow },
   { id: 'capabilities', label: 'Capabilities', icon: Layers, component: Capabilities },
   { id: 'vision', label: 'Vision', icon: Eye, component: VisionPanel },
   { id: 'router', label: 'Intent Router', icon: Zap, component: IntentRouter },
+  { id: 'blobs', label: 'Blob Transfer', icon: File, component: BlobTransfer },
   { id: 'agents', label: 'Agent Inspector', icon: Activity, component: AgentInspector },
   { id: 'integrations', label: 'Integrations', icon: Puzzle, component: IntegrationPanel },
   { id: 'projects', label: 'Projects', icon: Folder, component: ProjectsPanel },
